@@ -1,0 +1,10 @@
+{
+  "name": "monotickets",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "lint": "npm run lint --prefix backend && npm run lint --prefix frontend",
+    "test": "npm run test --prefix backend && npm run test --prefix frontend",
+    "test:ci": "npm run test:ci --prefix backend && npm run test:ci --prefix frontend"
+  }
+}

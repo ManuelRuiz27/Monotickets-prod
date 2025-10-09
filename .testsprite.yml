@@ -1,0 +1,61 @@
+fail_on_error: true
+report: html
+mcp_integration: true
+
+variables:
+  api_base: ${TEST_TARGET_API}
+  web_base: ${TEST_TARGET_WEB}
+
+targets:
+  api:
+    description: Backend smoke coverage
+    base_url: "${api_base}"
+    steps:
+      - name: health-check
+        request:
+          method: GET
+          path: /health
+        expect:
+          status: 200
+          json:
+            status: ok
+      - name: guests-endpoint
+        request:
+          method: GET
+          path: /events/ev123/guests
+        expect:
+          status: 200
+      - name: scan-validate
+        request:
+          method: POST
+          path: /scan/validate
+          headers:
+            Content-Type: application/json
+          body:
+            eventId: ev123
+            code: QR-XYZ
+        expect:
+          status: 200
+          json-schema:
+            type: object
+            required: [status]
+            properties:
+              status:
+                type: string
+                enum: [valid, duplicate, invalid]
+  web:
+    description: Frontend smoke checks
+    base_url: "${web_base}"
+    steps:
+      - name: home-page
+        request:
+          method: GET
+          path: /
+        expect:
+          status: 200
+      - name: staff-page
+        request:
+          method: GET
+          path: /staff
+        expect:
+          status: 200
