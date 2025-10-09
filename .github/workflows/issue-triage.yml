@@ -1,0 +1,46 @@
+name: Issue triage
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply rules
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = context.payload.issue.title || '';
+            const body = context.payload.issue.body || '';
+            const labelsToAdd = new Set();
+
+            if (title.startsWith('[SMOKE]')) {
+              labelsToAdd.add('type:smoke');
+              labelsToAdd.add('priority:p0');
+            }
+
+            const severityMatch = body.match(/Severidad:\s*(blocker|high|medium|low)/i);
+            if (severityMatch) {
+              labelsToAdd.add(`severity:${severityMatch[1].toLowerCase()}`);
+            }
+
+            const flakyMatch = body.match(/¿flaky\?\s*:?\s*(sí|si|yes)/i);
+            if (flakyMatch) {
+              labelsToAdd.add('status:flaky');
+            }
+
+            if (labelsToAdd.size > 0) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: context.issue.number,
+                labels: Array.from(labelsToAdd),
+              });
+            }
