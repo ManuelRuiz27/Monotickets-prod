@@ -1,0 +1,31 @@
+services:
+  auth:
+    command: npm run dev
+    environment:
+      NODE_ENV: development
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./backend/auth:/app
+      - /app/node_modules
+    ports:
+      - "3001:3000"
+  events:
+    command: npm run dev
+    environment:
+      NODE_ENV: development
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./backend/events:/app
+      - /app/node_modules
+    ports:
+      - "3002:3000"
+  guests:
+    command: npm run dev
+    environment:
+      NODE_ENV: development
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./backend/guests:/app
+      - /app/node_modules
+    ports:
+      - "3003:3000"
