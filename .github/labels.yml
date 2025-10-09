@@ -1,0 +1,51 @@
+- name: type:smoke
+  color: "0e8a16"
+  description: Smoke tests y disponibilidad.
+- name: type:e2e
+  color: "1f6feb"
+  description: Pruebas E2E Playwright/Cypress.
+- name: type:contract
+  color: "0ea5e9"
+  description: Pruebas de contrato/API.
+- name: type:performance
+  color: "b07219"
+  description: k6 / rendimiento / SLOs.
+- name: component:frontend
+  color: "d4c5f9"
+  description: PWA / landing / dashboard UI.
+- name: component:backend
+  color: "fbca04"
+  description: APIs / servicios / colas.
+- name: component:infra
+  color: "ffa657"
+  description: Docker/compose/CI/CD.
+- name: status:flaky
+  color: "d73a4a"
+  description: Test inestable/flaky.
+- name: severity:blocker
+  color: "b60205"
+  description: Flujo crítico roto.
+- name: severity:high
+  color: "d93f0b"
+  description: Impacto alto (seguridad/datos).
+- name: severity:medium
+  color: "f9d0c4"
+  description: Impacto medio (funcional).
+- name: severity:low
+  color: "c2e0c6"
+  description: Cosmético/esquinas.
+- name: priority:p0
+  color: "b60205"
+  description: Corregir hoy.
+- name: priority:p1
+  color: "e99695"
+  description: Corregir en sprint.
+- name: priority:p2
+  color: "fef2c0"
+  description: Backlog próximo.
+- name: needs:repro
+  color: "c5def5"
+  description: Falta repro/entorno.
+- name: needs:owner
+  color: "0366d6"
+  description: Falta responsable.

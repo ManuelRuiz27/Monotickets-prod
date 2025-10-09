@@ -1,0 +1,24 @@
+component:frontend:
+  - frontend/**
+  - apps/frontend/**
+  - pwa/**
+component:backend:
+  - backend/**
+  - services/**
+  - apps/backend/**
+component:infra:
+  - infra/**
+  - .github/**
+  - docker/**
+  - tests/Dockerfile
+  - docker-compose.yml
+type:e2e:
+  - tests/e2e_**/**
+  - tests/testsprite.config.*
+type:smoke:
+  - infra/check-*.sh
+  - .github/workflows/smoke.yml
+type:contract:
+  - tests/api_contract/**
+type:performance:
+  - tests/perf_k6/**
