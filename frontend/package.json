@@ -1,0 +1,13 @@
+{
+  "name": "@monotickets/frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js",
+    "lint": "node scripts/lint-placeholder.js",
+    "test": "npm run test:ci",
+    "test:ci": "node scripts/test-placeholder.js"
+  }
+}

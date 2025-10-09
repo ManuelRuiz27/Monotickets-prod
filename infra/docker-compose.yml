@@ -1,0 +1,122 @@
+version: '3.9'
+
+networks:
+  monotickets_net:
+    name: monotickets_net
+
+volumes:
+  pg_data:
+  uploads_local:
+
+services:
+  database:
+    image: postgres:16-alpine
+    container_name: monotickets_database
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-monotickets}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - monotickets_net
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    container_name: monotickets_redis
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - monotickets_net
+    ports:
+      - "6379:6379"
+
+  backend-api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: monotickets_backend_api
+    env_file:
+      - ../.env
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - monotickets_net
+    volumes:
+      - uploads_local:/app/uploads
+    healthcheck:
+      test:
+        ["CMD", "node", "-e", "fetch('http://localhost:8080/health').then(r=>{if(r.status!==200)process.exit(1);}).catch(()=>process.exit(1));"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  workers:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: monotickets_workers
+    command: ["node", "src/worker.js"]
+    env_file:
+      - ../.env
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - monotickets_net
+    volumes:
+      - uploads_local:/app/uploads
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: monotickets_frontend
+    env_file:
+      - ../.env
+    depends_on:
+      backend-api:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    networks:
+      - monotickets_net
+    healthcheck:
+      test:
+        ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>{if(r.status!==200)process.exit(1);}).catch(()=>process.exit(1));"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  tests:
+    image: node:20-alpine
+    container_name: monotickets_tests
+    working_dir: /workspace
+    env_file:
+      - ../.env
+    volumes:
+      - ..:/workspace:delegated
+    networks:
+      - monotickets_net
+    depends_on:
+      backend-api:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    command: ["npx", "testsprite", "run", "--config", ".testsprite.yml"]
