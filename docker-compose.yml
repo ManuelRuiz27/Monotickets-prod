@@ -14,6 +14,11 @@ x-prod-env: &prod-env
   NEXT_TELEMETRY_DISABLED: "1"
 
 services:
+  database:
+    extends:
+      file: ./infra/docker-compose.yml
+      service: database
+
   backend-api:
     extends:
       file: ./infra/docker-compose.yml
@@ -136,6 +141,23 @@ services:
       - ./coverage:/app/coverage
       - ./tests/artifacts:/app/tests/artifacts
 
+  metabase:
+    image: metabase/metabase:latest
+    container_name: monotickets_metabase
+    restart: unless-stopped
+    environment:
+      MB_SITE_URL: ${METABASE_SITE_URL:-http://localhost:3002}
+      MB_DB_FILE: /metabase-data/metabase.db
+    ports:
+      - "3002:3000"
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - monotickets_net
+    volumes:
+      - metabase_data:/metabase-data
+
 networks:
   monotickets_net:
     name: monotickets_net
@@ -143,3 +165,4 @@ networks:
 volumes:
   pwa_node_modules:
   dashboard_node_modules:
+  metabase_data:
