@@ -6,16 +6,16 @@
     "lint": "npm run lint --prefix backend && npm run lint --prefix frontend",
     "test": "npm run test --prefix backend && npm run test --prefix frontend",
     "test:ci": "npm run test:ci --prefix backend && npm run test:ci --prefix frontend",
-    "test:e2e:all": "testsprite run --config ./tests/testsprite.config.js --reporter junit --out ./reports/junit",
-    "test:e2e:guest": "testsprite run -t @confirm --config ./tests/testsprite.config.js --reporter junit --out ./reports/junit",
-    "test:e2e:staff": "testsprite run -t @scan --config ./tests/testsprite.config.js --reporter junit --out ./reports/junit",
-    "test:e2e:wa": "testsprite run -t @wa --config ./tests/testsprite.config.js --reporter junit --out ./reports/junit",
+    "test:e2e:all": "node ./tests/scripts/run-e2e.js",
+    "test:e2e:guest": "node ./tests/scripts/run-e2e.js -t @confirm",
+    "test:e2e:staff": "node ./tests/scripts/run-e2e.js -t @scan",
+    "test:e2e:wa": "node ./tests/scripts/run-e2e.js -t @wa",
     "test:post": "node ./tests/scripts/collect-artifacts.js || true",
     "smoke:services": "bash ./infra/check-services.sh",
     "smoke:readiness": "bash ./infra/check-readiness.sh"
   },
   "devDependencies": {
     "@playwright/test": "^1.41.0",
-    "testsprite": "^1.0.0"
+    "dotenv": "^16.4.5"
   }
 }

@@ -48,8 +48,6 @@ RUN apt-get update \
 
 WORKDIR /app
 
-RUN npm install -g testsprite
-
 COPY package.json package-lock.json ./
 RUN npm install
 

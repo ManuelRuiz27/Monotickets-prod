@@ -64,9 +64,10 @@ Override browser-facing values using `.env.local` (for Next.js in future phases)
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `TESTSPRITE_API_KEY` | API key provided to `npx testsprite`. Store as `TESTSPRITE_API_KEY` secret in GitHub. | `use_github_secret_in_CI` |
-| `TEST_TARGET_API` | URL the TestSprite suite hits for backend smoke tests. | `http://backend-api:8080` |
-| `TEST_TARGET_WEB` | URL for frontend smoke tests. | `http://frontend:3000` |
+| `E2E_EVENT_ID` | Identificador de evento usado en las comprobaciones HTTP del runner E2E. | `demo-event` |
+| `E2E_SAMPLE_CODE` | Código de ejemplo que se envía al endpoint `/scan/validate`. | `MONO-123-ABC` |
+| `TEST_TARGET_API` | URL que consume el runner E2E para validar el backend. | `http://backend-api:8080` |
+| `TEST_TARGET_WEB` | URL que consume el runner E2E para validar el frontend. | `http://frontend:3000` |
 
 ## Overriding per Environment
 
@@ -81,6 +82,6 @@ Override browser-facing values using `.env.local` (for Next.js in future phases)
          - ./local-uploads:/app/uploads
    ```
 
-4. In CI, define secrets/environment variables within GitHub Actions (e.g., `TESTSPRITE_API_KEY`, `JWT_SECRET`).
+4. In CI, define secrets/environment variables within GitHub Actions (por ejemplo `JWT_SECRET`, claves de 360dialog, Resend o los valores del runner E2E).
 
 Keeping secrets out of the repository ensures consistent local experience without exposing credentials.

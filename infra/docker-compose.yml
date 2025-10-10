@@ -1,5 +1,3 @@
-version: '3.9'
-
 networks:
   monotickets_net:
     name: monotickets_net
@@ -119,4 +117,4 @@ services:
         condition: service_healthy
       frontend:
         condition: service_healthy
-    command: ["npx", "testsprite", "run", "--config", ".testsprite.yml"]
+    command: ["node", "tests/scripts/run-e2e.js"]
