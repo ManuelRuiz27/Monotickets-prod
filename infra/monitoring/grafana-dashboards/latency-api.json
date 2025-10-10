@@ -1,0 +1,60 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Monotickets API Latency",
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 1,
+    "editable": true,
+    "panels": [
+      {
+        "type": "timeseries",
+        "title": "p95 latency by path",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "PROMETHEUS_DS"
+        },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket[$__interval])) by (le, path))",
+            "legendFormat": "{{path}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms"
+          }
+        },
+        "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 }
+      },
+      {
+        "type": "stat",
+        "title": "Error rate (5xx %)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "PROMETHEUS_DS"
+        },
+        "targets": [
+          {
+            "expr": "sum(rate(http_request_duration_ms_count{status=~\"5..\"}[5m])) / sum(rate(http_request_duration_ms_count[5m]))",
+            "legendFormat": "5xx"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 0.02 },
+                { "color": "red", "value": 0.05 }
+              ]
+            }
+          }
+        },
+        "gridPos": { "h": 6, "w": 8, "x": 0, "y": 10 }
+      }
+    ]
+  }
+}
