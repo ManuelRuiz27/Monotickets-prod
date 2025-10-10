@@ -66,4 +66,5 @@ Este directorio documenta cómo preparar y poblar la base de datos operacional u
 
 - Las particiones mensuales de `scan_logs` se crean para el mes anterior y el actual. Revisa el comentario dentro de `010_partitions_scan_logs.sql` para automatizar la retención de 90–180 días.
 - La semilla incluye escenarios de confirmación, escaneo (show-up) y bitácoras de mensajes para validar dashboards y flujos operativos.
+- Para aplicar las nuevas particiones de `delivery_logs` + vistas materializadas, ejecuta el archivo `docs/db/migrations/20240615001_delivery_director.sql` después de `infra/migrations/020_indexes.sql` (puedes usar `psql -f` o copiar los bloques necesarios).
 - Para ambientes productivos, reemplaza la semilla por tus propios datos y ajusta las políticas de retención antes de exponer la base a clientes finales.

@@ -30,8 +30,15 @@ The database container persists data in the `pg_data` volume. Future table parti
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `REDIS_URL` | Connection string for Redis (BullMQ queues locally). | `redis://redis:6379` |
+| `REDIS_URL` | Connection string for Redis (queue + cache operations). | `redis://redis:6379` |
 | `WORKER_POLL_INTERVAL_MS` | Interval between worker heartbeat checks. | `5000` |
+| `DELIVERY_QUEUE_NAME` | Queue key for outbound delivery jobs. | `deliveryQueue` |
+| `WA_INBOUND_QUEUE_NAME` | Queue key for inbound WhatsApp webhooks. | `waInboundQueue` |
+| `PAYMENTS_QUEUE_NAME` | Queue key for asynchronous payment processing. | `paymentsQueue` |
+| `QUEUE_METRICS_INTERVAL_MS` | Frequency for emitting queue size metrics. | `30000` |
+| `QUEUE_BACKOFF_DELAY_MS` | Base delay (ms) for exponential retry backoff. | `5000` |
+| `PAYMENTS_WEBHOOK_BACKOFF_MS` | Retry delay for payment webhooks when remote providers fail. | `3000` |
+| `WA_WEBHOOK_BACKOFF_DELAY_MS` | Retry delay for inbound WhatsApp webhook processing. | `2000` |
 
 Uploads generated locally (PDF/media) are mounted through the `uploads_local` volume, simulating Cloudflare R2 during development.
 
@@ -51,7 +58,17 @@ To map the uploads directory when running locally, create `docker-compose.overri
 | Variable | Description |
 | --- | --- |
 | `WA_360DIALOG_API_KEY` | WhatsApp (360dialog) API key. Use GitHub Secrets for CI/CD. |
+| `WA_360DIALOG_API_URL` | Override default 360dialog endpoint if using a regional tenant. |
+| `WA_SESSION_TTL_SECONDS` | TTL applied to Redis/DB session window (default 24h). |
 | `RESEND_API_KEY` | Resend email API key. |
+| `RESEND_API_URL` | Optional Resend API endpoint override. |
+| `RESEND_FROM_EMAIL` | Default sender address for transactional emails. |
+| `DEFAULT_ORGANIZER_ID` | UUID por defecto cuando la petición no envía `organizerId`. |
+| `PAYMENTS_PROVIDER` | `stripe`, `conekta` or `mock` to choose primary processor. |
+| `STRIPE_SECRET_KEY` | Stripe secret (test/live) used to create payment intents. |
+| `STRIPE_API_URL` | Stripe API base for payment intent creation. |
+| `CONEKTA_API_KEY` | Conekta private key used for charges. |
+| `CONEKTA_API_URL` | Conekta Orders API base URL. |
 
 ## Frontend
 
@@ -68,6 +85,12 @@ Override browser-facing values using `.env.local` (for Next.js in future phases)
 - El backend expone `GET /metrics` con las series `http_request_duration_ms_bucket`, `http_request_duration_ms_sum` y `http_request_duration_ms_count`, siguiendo el formato Prometheus. Mantén el endpoint habilitado únicamente en redes privadas.
 - Para correlacionar peticiones, la cabecera `x-request-id` se propaga a las respuestas y a los logs; en `/scan/validate` se añade `event_id` al registro final cuando está presente en la carga útil.
 
+## Trabajos en segundo plano
+
+- `LANDING_TTL_DEFAULT_DAYS`, `LANDING_TTL_LOCK_TTL_SECONDS`, `LANDING_JOB_HOUR` y `LANDING_JOB_MINUTE` controlan el job nocturno que archiva/expira landings. Ajusta los valores por entorno y usa `--dry-run`/`--force` en el contenedor `workers` para QA.
+- `DIRECTOR_CACHE_TTL_SECONDS` define el TTL del caché de panel en Redis.
+- Ajusta los umbrales de reintento (`QUEUE_BACKOFF_DELAY_MS`, `PAYMENTS_WEBHOOK_BACKOFF_MS`, `WA_WEBHOOK_BACKOFF_DELAY_MS`) según los SLAs de cada proveedor.
+
 ## Variables sensibles por entorno (local/staging)
 
 | Variable | Local (`.env`) | GitHub Secret (staging) | Servicios consumidores |
@@ -83,6 +106,9 @@ Override browser-facing values using `.env.local` (for Next.js in future phases)
 | `R2_ENDPOINT` | `R2_ENDPOINT` | `R2_ENDPOINT` | backend-api, workers |
 | `WA_360DIALOG_API_KEY` | `WA_360DIALOG_API_KEY` | `WA_360DIALOG_API_KEY` | backend-api |
 | `RESEND_API_KEY` | `RESEND_API_KEY` | `RESEND_API_KEY` | backend-api |
+| `STRIPE_SECRET_KEY` | `STRIPE_SECRET_KEY` | `STRIPE_SECRET_KEY` | backend-api, workers |
+| `CONEKTA_API_KEY` | `CONEKTA_API_KEY` | `CONEKTA_API_KEY` | backend-api, workers |
+| `PAYMENTS_PROVIDER` | `PAYMENTS_PROVIDER` | `PAYMENTS_PROVIDER` | backend-api, workers |
 | `NEXT_PUBLIC_API_BASE` | `NEXT_PUBLIC_API_BASE` | `NEXT_PUBLIC_API_BASE` | frontend |
 | `SUPABASE_URL` | _(no aplica local)_ | `SUPABASE_URL` | frontend (build) |
 | `SUPABASE_KEY` | _(no aplica local)_ | `SUPABASE_KEY` | frontend (build) |

@@ -8,6 +8,10 @@ import {
   signViewerToken,
 } from './auth/tokens.js';
 import { createLogger } from './logging.js';
+import { createQueues } from './queues/index.js';
+import { createDeliveryModule } from './modules/delivery.js';
+import { createDirectorModule } from './modules/director.js';
+import { createPaymentsModule } from './modules/payments.js';
 
 const DEFAULT_APP_ENV = 'development';
 const HISTOGRAM_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
@@ -64,6 +68,15 @@ function renderMetrics() {
 export function createServer(options = {}) {
   const { env = process.env } = options;
   const logger = options.logger || createLogger({ env, service: env.SERVICE_NAME || 'backend-api' });
+  const queuesPromise = createQueues({ env, logger }).catch((error) => {
+    log({ level: 'error', message: 'queue_initialization_failed', error: error.message }, { logger });
+    throw error;
+  });
+  const deliveryModule = createDeliveryModule({ env, logger, queuesPromise });
+  const directorModule = createDirectorModule({ env, logger });
+  const paymentsModule = createPaymentsModule({ env, logger, queuesPromise });
+
+  attachQueueObservers(queuesPromise, logger, env);
 
   return http.createServer(async (req, res) => {
     const startedAt = process.hrtime.bigint();
@@ -82,6 +95,70 @@ export function createServer(options = {}) {
 
       if (method === 'GET' && url.pathname === '/health') {
         return sendJson(res, 200, { status: 'ok', env: env.APP_ENV || DEFAULT_APP_ENV });
+      }
+
+      if (
+        method === 'POST' &&
+        /^\/events\/[^/]+\/guests\/[^/]+\/send$/.test(url.pathname)
+      ) {
+        const [, , eventId, , guestId] = url.pathname.split('/');
+        requestContext.eventId = eventId;
+        const body = await readJsonBody(req, logger);
+        const { statusCode, payload } = await deliveryModule.enqueueSend({
+          eventId,
+          guestId,
+          body,
+          requestId,
+        });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'POST' && url.pathname === '/wa/webhook') {
+        const body = await readJsonBody(req, logger);
+        const { statusCode, payload } = await deliveryModule.enqueueWebhook({
+          body,
+          requestId,
+        });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'GET' && url.pathname.startsWith('/wa/session/')) {
+        const phone = url.pathname.split('/').at(-1);
+        const { statusCode, payload } = await deliveryModule.getSession({ phone });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'GET' && url.pathname === '/director/overview') {
+        const { statusCode, payload, headers } = await directorModule.getOverview();
+        if (headers) {
+          Object.entries(headers).forEach(([key, value]) => {
+            res.setHeader(key, value);
+          });
+        }
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'POST' && url.pathname === '/director/payments') {
+        const body = await readJsonBody(req, logger);
+        const { statusCode, payload } = await directorModule.registerPayment({ body, requestId });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'POST' && url.pathname === '/payments/intent') {
+        const body = await readJsonBody(req, logger);
+        const { statusCode, payload } = await paymentsModule.createIntent({ body, requestId });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'POST' && url.pathname === '/payments/webhook') {
+        const body = await readJsonBody(req, logger);
+        const headers = Object.fromEntries(Object.entries(req.headers || {}));
+        const { statusCode, payload } = await paymentsModule.enqueueWebhook({
+          body,
+          headers,
+          requestId,
+        });
+        return sendJson(res, statusCode, { ...payload, requestId });
       }
 
       if (
@@ -138,11 +215,6 @@ export function createServer(options = {}) {
         }
       }
 
-      if (method === 'POST' && url.pathname === '/wa/webhook') {
-        await readBody(req); // discard payload
-        return sendJson(res, 200, { status: 'accepted' });
-      }
-
       sendJson(res, 404, { error: 'not_found' });
     } catch (error) {
       sendJson(res, 500, { error: 'internal_error' });
@@ -182,6 +254,67 @@ export function createServer(options = {}) {
       );
     }
   });
+}
+
+function attachQueueObservers(queuesPromise, logger, env) {
+  queuesPromise
+    .then((queues) => {
+      const watchers = [
+        { name: 'delivery', events: queues.deliveryEvents, queue: queues.deliveryQueue },
+        { name: 'waInbound', events: queues.waInboundEvents, queue: queues.waInboundQueue },
+        { name: 'payments', events: queues.paymentsEvents, queue: queues.paymentsQueue },
+      ];
+
+      watchers.forEach(({ name, events }) => {
+        if (!events) return;
+        events.on('failed', ({ jobId, job }) => {
+          log(
+            {
+              level: 'warn',
+              message: 'queue_job_failed',
+              queue: name,
+              job_id: jobId,
+              delivery_log_id: job?.deliveryLogId,
+            },
+            { logger },
+          );
+        });
+        events.on('dead-letter', ({ jobId, job }) => {
+          log(
+            {
+              level: 'error',
+              message: 'queue_job_dead_letter',
+              queue: name,
+              job_id: jobId,
+              delivery_log_id: job?.deliveryLogId,
+            },
+            { logger },
+          );
+        });
+      });
+
+      const interval = Number(env.QUEUE_METRICS_INTERVAL_MS || 30000);
+      const emitMetrics = async () => {
+        try {
+          const snapshot = await Promise.all(
+            watchers.map(async ({ name, queue }) => ({
+              name,
+              waiting: await queue.countWaiting(),
+              delayed: await queue.countDelayed(),
+              active: await queue.countActive(),
+            })),
+          );
+          log({ level: 'info', message: 'queue_metrics_snapshot', queues: snapshot }, { logger });
+        } catch (error) {
+          log({ level: 'error', message: 'queue_metrics_error', error: error.message }, { logger });
+        }
+      };
+
+      setInterval(emitMetrics, interval).unref();
+    })
+    .catch((error) => {
+      log({ level: 'error', message: 'queue_observer_failed', error: error.message }, { logger });
+    });
 }
 
 export function createLoginTokens({ userId, role, env = process.env }) {
