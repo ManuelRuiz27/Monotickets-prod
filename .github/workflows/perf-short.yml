@@ -1,0 +1,49 @@
+name: Nightly Perf Checks
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: '1'
+      BASE_URL_BACKEND: ${{ secrets.BASE_URL_BACKEND || 'http://backend:3000' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: tests/package-lock.json
+
+      - name: Install dependencies (tests)
+        run: npm ci
+        working-directory: tests
+
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Ensure perf reports directory
+        run: mkdir -p reports/perf
+
+      - name: Run scan spike
+        run: npm run perf:scan
+        working-directory: tests
+
+      - name: Run confirm burst
+        run: npm run perf:confirm
+        working-directory: tests
+
+      - name: Upload perf summaries
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-reports
+          path: reports/perf

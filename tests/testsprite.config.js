@@ -37,6 +37,14 @@ module.exports = {
       ],
       tags: ['@wa'],
     },
+    delivery: {
+      specs: ['tests/e2e_delivery/**/*.{spec,test}.{js,ts,jsx,tsx}'],
+      tags: ['@wa', '@delivery'],
+    },
+    director: {
+      specs: ['tests/e2e_director/**/*.{spec,test}.{js,ts,jsx,tsx}'],
+      tags: ['@director', '@kpi'],
+    },
   },
   runner: {
     name: 'playwright',
