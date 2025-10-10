@@ -1,0 +1,9 @@
+{
+  "extends": ["next", "next/core-web-vitals"],
+  "plugins": ["jsx-a11y"],
+  "rules": {
+    "jsx-a11y/no-autofocus": "error",
+    "jsx-a11y/alt-text": "error",
+    "jsx-a11y/anchor-is-valid": "error"
+  }
+}
