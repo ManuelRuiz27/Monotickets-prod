@@ -80,39 +80,50 @@ confirmed_guests AS (
     FROM guests_inserted g
     WHERE g.status IN ('confirmed', 'scanned')
 ),
-valid_scans_data AS (
+valid_scans_base AS (
     SELECT
         cg.event_id,
         cg.guest_id,
-        'valid'::text AS result,
+        cg.rn,
         CASE
-            WHEN cg.rn % 2 = 0 THEN date_trunc('minute', now() - interval '40 days') - (cg.rn * interval '45 minutes')
-            ELSE date_trunc('minute', now() - interval '12 days') - (cg.rn * interval '30 minutes')
-        END AS ts,
+            WHEN cg.rn <= 5 THEN date_trunc('minute', now() - interval '40 days') + (cg.rn * interval '25 minutes')
+            ELSE date_trunc('minute', now() - interval '12 days') + (cg.rn * interval '20 minutes')
+        END AS base_ts,
+        CASE
+            WHEN cg.rn <= 4 THEN 4
+            WHEN cg.rn <= 7 THEN 3
+            ELSE 2
+        END AS scan_repetitions,
         jsonb_build_object(
             'location', CASE WHEN cg.rn % 2 = 0 THEN 'VIP Gate' ELSE 'Main Gate' END,
             'device_id', concat('scanner-', cg.event_id::text)
-        ) AS device,
-        cg.rn
+        ) AS device
     FROM confirmed_guests cg
-    WHERE cg.rn <= 8
+    WHERE cg.rn <= 10
 ),
 valid_scans AS (
     INSERT INTO scan_logs (event_id, guest_id, result, ts, device)
-    SELECT event_id, guest_id, result, ts, device
-    FROM valid_scans_data
+    SELECT
+        event_id,
+        guest_id,
+        'valid',
+        base_ts + ((attempt.iteration - 1) * interval '5 minutes'),
+        device
+    FROM valid_scans_base
+    JOIN LATERAL generate_series(1, scan_repetitions) AS attempt(iteration) ON TRUE
     RETURNING 1
 ),
 duplicate_scans AS (
     INSERT INTO scan_logs (event_id, guest_id, result, ts, device)
     SELECT
-        v.event_id,
-        v.guest_id,
+        base.event_id,
+        base.guest_id,
         'duplicate',
-        v.ts + (dup.iteration * interval '45 seconds'),
-        v.device
-    FROM valid_scans_data v
-    JOIN LATERAL generate_series(1, 3) AS dup(iteration) ON TRUE
+        base.base_ts + (dup.iteration * interval '2 minutes'),
+        base.device
+    FROM valid_scans_base base
+    JOIN LATERAL generate_series(1, CASE WHEN base.rn <= 3 THEN 2 ELSE 1 END) AS dup(iteration) ON TRUE
+    WHERE base.rn <= 6
     RETURNING 1
 ),
 pending_guests AS (
