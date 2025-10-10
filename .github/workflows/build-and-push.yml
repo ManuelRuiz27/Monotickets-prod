@@ -1,0 +1,156 @@
+name: Build & Push
+
+on:
+  push:
+    branches: [develop, main]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'push' && contains(fromJson('["refs/heads/develop","refs/heads/main"]'), github.ref)) ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+        contains(fromJson('["develop","main"]'), github.event.workflow_run.head_branch)) ||
+      (github.event_name == 'workflow_dispatch')
+    steps:
+      - name: Evaluate CI gate
+        id: ci_gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'push') {
+              core.setOutput('build', 'true');
+              return;
+            }
+            const branch = context.ref.replace('refs/heads/', '');
+            const allowed = ['develop', 'main'];
+            if (!allowed.includes(branch)) {
+              core.setOutput('build', 'false');
+              return;
+            }
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'ci.yml',
+              branch,
+              per_page: 20,
+            });
+            const run = data.workflow_runs.find((r) => r.head_sha === context.sha);
+            if (!run || run.conclusion !== 'success') {
+              core.notice('CI run not successful yet; waiting for workflow_run trigger.');
+              core.setOutput('build', 'false');
+              return;
+            }
+            core.setOutput('build', 'true');
+
+      - name: Checkout
+        if: steps.ci_gate.outputs.build == 'true'
+        uses: actions/checkout@v4
+
+      - name: Derive registry host
+        if: steps.ci_gate.outputs.build == 'true'
+        id: registry
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+        run: |
+          HOST="${REGISTRY_URL%%/*}"
+          if [ -z "$HOST" ]; then
+            echo "Registry URL must not be empty" >&2
+            exit 1
+          fi
+          echo "host=${HOST}" >> "$GITHUB_OUTPUT"
+          echo "namespace=${REGISTRY_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        if: steps.ci_gate.outputs.build == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.ci_gate.outputs.build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to container registry
+        if: steps.ci_gate.outputs.build == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Determine build metadata
+        if: steps.ci_gate.outputs.build == 'true'
+        id: meta
+        env:
+          REGISTRY_NAMESPACE: ${{ steps.registry.outputs.namespace }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            BRANCH="${{ github.event.workflow_run.head_branch }}"
+            SHA="${{ github.event.workflow_run.head_sha }}"
+          else
+            BRANCH="${{ github.ref_name }}"
+            SHA="${{ github.sha }}"
+          fi
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+          BACKEND_TAGS="${REGISTRY_NAMESPACE}/backend-api:${SHA}"
+          WORKER_TAGS="${REGISTRY_NAMESPACE}/workers:${SHA}"
+          FRONTEND_TAGS="${REGISTRY_NAMESPACE}/frontend:${SHA}"
+
+          if [ "$BRANCH" = "main" ]; then
+            BACKEND_TAGS="$BACKEND_TAGS\n${REGISTRY_NAMESPACE}/backend-api:latest"
+            WORKER_TAGS="$WORKER_TAGS\n${REGISTRY_NAMESPACE}/workers:latest"
+            FRONTEND_TAGS="$FRONTEND_TAGS\n${REGISTRY_NAMESPACE}/frontend:latest"
+          fi
+
+          {
+            echo "backend<<EOF"
+            printf "%s\n" "$BACKEND_TAGS"
+            echo "EOF"
+            echo "workers<<EOF"
+            printf "%s\n" "$WORKER_TAGS"
+            echo "EOF"
+            echo "frontend<<EOF"
+            printf "%s\n" "$FRONTEND_TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push backend-api image
+        if: steps.ci_gate.outputs.build == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.backend }}
+
+      - name: Build & push workers image
+        if: steps.ci_gate.outputs.build == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.workers }}
+
+      - name: Build & push frontend image
+        if: steps.ci_gate.outputs.build == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.frontend }}
+
+      - name: Build skipped notice
+        if: steps.ci_gate.outputs.build != 'true'
+        run: echo "Skipping image build; awaiting CI success trigger."

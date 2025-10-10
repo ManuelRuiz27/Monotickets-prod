@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: monotickets-backend
+    static_configs:
+      - targets:
+          - backend-api:8080
+        labels:
+          service: backend-api
+  - job_name: monotickets-workers
+    # Workers currently emit logs only; expose /metrics when instrumentation is available.
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - workers:8081
+        labels:
+          service: workers
+    honor_labels: true

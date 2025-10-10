@@ -3,24 +3,107 @@ name: Deploy Staging
 on:
   push:
     branches: [develop]
+  workflow_run:
+    workflows: ["Build & Push"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Override image tag (defaults to latest successful SHA)"
+        required: false
+
+permissions:
+  contents: read
 
 jobs:
-  verify:
-    name: Verify CI status
+  notify:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - name: Confirm required checks
-        run: |
-          echo "Branch protection requires Lint, Unit Tests, and TestSprite QA to succeed before deployment."
-          echo "This job runs after pushes to develop as a final gate."
+      - run: echo 'Staging deploys execute after the Build & Push workflow succeeds.'
+
   deploy:
-    name: Deploy to Staging
+    if: github.event_name != 'push' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-    needs: verify
+    environment: staging
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Placeholder deployment
+      - name: Determine release metadata
+        id: meta
+        env:
+          DEFAULT_BRANCH: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
+          DEFAULT_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          INPUT_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag || '' }}
         run: |
-          echo "TODO: Invoke infra/ansible/deploy.yml when available."
-          echo "Staging deployment pipeline will be implemented in a future phase."
+          SHA="$DEFAULT_SHA"
+          BRANCH="$DEFAULT_BRANCH"
+          if [ -n "$INPUT_TAG" ]; then
+            SHA="$INPUT_TAG"
+          fi
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify CI & TestSprite
+        id: ci_status
+        uses: actions/github-script@v7
+        env:
+          TARGET_SHA: ${{ steps.meta.outputs.sha }}
+        with:
+          script: |
+            const sha = process.env.TARGET_SHA;
+            if (!sha) {
+              core.setFailed('Missing target SHA for deployment.');
+              return;
+            }
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'ci.yml',
+              per_page: 20,
+            });
+            const run = data.workflow_runs.find((r) => r.head_sha === sha);
+            if (!run) {
+              core.setFailed(`CI workflow not found for ${sha}`);
+              return;
+            }
+            if (run.conclusion !== 'success') {
+              core.setFailed(`CI workflow for ${sha} did not succeed (state: ${run.conclusion}).`);
+              return;
+            }
+            const jobs = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: run.id,
+              per_page: 50,
+            });
+            const testsprite = jobs.data.jobs.find((job) => job.name === 'TestSprite QA');
+            if (!testsprite || testsprite.conclusion !== 'success') {
+              core.setFailed('TestSprite QA did not succeed; aborting deploy.');
+              return;
+            }
+            core.info(`CI and TestSprite succeeded for ${sha}.`);
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare SSH key
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_staging
+          chmod 600 ~/.ssh/id_staging
+
+      - name: Deploy to staging
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY_PATH: ~/.ssh/id_staging
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+        run: ./infra/scripts/deploy_staging.sh
+
+      - name: Deployment summary
+        run: echo "Deployed image tag ${{ steps.meta.outputs.image_tag }} to staging (branch ${{ steps.meta.outputs.branch }})."
