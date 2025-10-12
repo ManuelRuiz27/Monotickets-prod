@@ -1,71 +1,54 @@
-# Base de datos Monotickets
+# Base de datos · Migraciones y semilla
 
-Este directorio documenta cómo preparar y poblar la base de datos operacional utilizada por los servicios de Monotickets, tanto en entornos locales (Docker) como en Supabase.
+Este proyecto utiliza PostgreSQL (compatible con Supabase) orquestado desde `infra/docker-compose.yml`. Sigue estos pasos para crear la base de datos local con el esquema inicial, datos de ejemplo y vistas materializadas para BI.
 
-## Requisitos previos
+## 1. Levantar la base de datos
 
-- Docker y Docker Compose.
-- `psql` instalado en tu máquina o dentro del contenedor.
-- Archivo `.env` con las credenciales de Postgres (ver `infra/README.md`).
+El stack principal ya se documenta en el `README.md` raíz. Para un entorno mínimo de base de datos basta con iniciar el servicio `database` definido en Compose:
 
-## Ejecutar migraciones y semilla en local
+```bash
+docker compose -f infra/docker-compose.yml up -d database
+```
 
-1. Levanta la base de datos con Docker Compose (usa el archivo de infraestructura para asegurarte de que Postgres y Redis estén disponibles):
+Los parámetros (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`) provienen de tu archivo `.env`. Si es la primera vez que lo ejecutas, PostgreSQL inicializará el volumen `pg_data` automáticamente.
 
-   ```bash
-   docker compose -f infra/docker-compose.yml up -d database
-   ```
+## 2. Ejecutar migraciones y seed
 
-2. Exporta las variables de conexión si necesitas valores distintos a los predeterminados (opcional):
+El script `infra/scripts/seed.sh` aplica en orden todas las migraciones de `infra/migrations/` y finalmente carga la semilla `040_seed.sql`.
+Necesitas tener el cliente `psql` disponible (se instala junto con PostgreSQL). Si prefieres no instalarlo en tu host, ejecuta el script dentro del contenedor con `docker compose exec database bash`.
 
-   ```bash
-   export DB_HOST=localhost
-   export DB_PORT=5432
-   export DB_NAME=monotickets
-   export DB_USER=postgres
-   export DB_PASSWORD=postgres
-   ```
+```bash
+# Desde la raíz del repo
+./infra/scripts/seed.sh
+```
 
-3. Ejecuta el script de migraciones y semilla:
+Por defecto el script usa las variables de entorno (`DB_HOST=localhost`, `DB_PORT=5432`, etc.). Si ejecutas el comando desde fuera del contenedor puedes exportar los valores o utilizar `DATABASE_URL`:
 
-   ```bash
-   ./infra/scripts/seed.sh
-   ```
+```bash
+DB_HOST=localhost DB_PORT=5432 DB_USER=postgres DB_PASSWORD=postgres ./infra/scripts/seed.sh
+# o
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/monotickets" ./infra/scripts/seed.sh
+```
 
-   El script aplica, en orden, las migraciones SQL dentro de `infra/migrations/` (estructura base, particiones, índices y datos de prueba). Si prefieres usar una URL completa, define `DATABASE_URL` antes de ejecutar el script.
+Al finalizar, deberías tener:
 
-4. Verifica los conteos mínimos sugeridos para QA:
+- 2 organizadores con precios diferenciados.
+- 2 eventos activos (standard y premium) con 16 invitados cada uno.
+- Bitácoras de envíos y escaneos (>80 registros) con datos distribuidos en las dos particiones mensuales de `scan_logs`.
+- Tablas financieras (`ticket_ledger`, `payments`) preparadas para cálculos de deuda y equivalencias.
+- Vistas materializadas refrescadas (`mv_*`) listas para su consumo en Metabase.
 
-   ```sql
-   SELECT COUNT(*) FROM events;           -- Debe regresar 2
-   SELECT COUNT(*) FROM guests;           -- Entre 20 y 40
-   SELECT COUNT(*) FROM invites;          -- Entre 20 y 40
-   SELECT COUNT(*) FROM scan_logs;        -- Mayor a 80
-   SELECT COUNT(*) FROM delivery_logs;    -- Mayor a 80
-   ```
+## 3. Refrescos programados
 
-## Ejecutar migraciones en Supabase
+Si tu Postgres soporta `pg_cron`, la migración `110_pg_cron_refresh.sql` registra tareas para refrescar las vistas cada 5, 10 o 60 minutos. En entornos donde `pg_cron` no esté disponible, consulta la nota en `docs/bi/kpis.md` para levantar un worker externo que ejecute `REFRESH MATERIALIZED VIEW CONCURRENTLY`.
 
-1. Crea un archivo `.env.supabase` (o agrega a tu `.env`) las variables de conexión entregadas por Supabase (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`).
-2. Abre una sesión de shell autenticada en Supabase (por ejemplo con `psql` o con `supabase db remote connect`).
-3. Ejecuta las migraciones utilizando el mismo script:
+## 4. Limpieza y resiembra
 
-   ```bash
-   DB_HOST=your.supabase.host \
-   DB_PORT=6543 \
-   DB_NAME=postgres \
-   DB_USER=postgres \
-   DB_PASSWORD=super-secret \
-   ./infra/scripts/seed.sh
-   ```
+Para regenerar los datos simplemente elimina el volumen `pg_data` y repite los pasos:
 
-   - Para bases remotas con certificados SSL asegúrate de incluir los parámetros adicionales requeridos por tu proveedor (por ejemplo `sslmode=require` dentro de `DATABASE_URL`).
-   - Si solo quieres aplicar la estructura sin datos de prueba, ejecuta manualmente los archivos `000_init_core.sql`, `010_partitions_scan_logs.sql` y `020_indexes.sql`.
+```bash
+docker compose -f infra/docker-compose.yml down -v
+# luego vuelve a levantar y corre seed.sh
+```
 
-## Consideraciones adicionales
-
-- Las particiones mensuales de `scan_logs` se crean para el mes anterior y el actual. Revisa el comentario dentro de `010_partitions_scan_logs.sql` para automatizar la retención de 90–180 días.
-- La semilla incluye escenarios de confirmación, escaneo (show-up) y bitácoras de mensajes para validar dashboards y flujos operativos.
-- Para aplicar las nuevas particiones de `delivery_logs` + vistas materializadas, ejecuta el archivo `docs/db/migrations/20240615001_delivery_director.sql` después de `infra/migrations/020_indexes.sql` (puedes usar `psql -f` o copiar los bloques necesarios).
-- Para habilitar el ledger de Director y las vistas de KPIs actualizadas usa también `docs/db/migrations/20240701001_director_ledger.sql`. Posteriormente refresca las vistas con `psql -f docs/db/migrations/refresh_kpis.sql`.
-- Para ambientes productivos, reemplaza la semilla por tus propios datos y ajusta las políticas de retención antes de exponer la base a clientes finales.
+> **Tip:** los comandos de docker-compose se pueden encadenar con otros servicios (`redis`, `backend-api`, etc.) una vez que la base está lista.

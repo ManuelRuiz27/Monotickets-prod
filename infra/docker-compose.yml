@@ -9,6 +9,7 @@ volumes:
   uploads_local:
   pdfs_local:
   media_local:
+  metabase_data:
 
 services:
   database:
@@ -148,6 +149,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: monotickets_metabase
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db
+    volumes:
+      - metabase_data:/metabase-data
+    ports:
+      - "3002:3000"
+    restart: unless-stopped
+    networks:
+      - monotickets_net
 
   tests:
     image: node:20-alpine
