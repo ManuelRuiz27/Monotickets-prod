@@ -1,30 +1,49 @@
-export interface KpiOverview {
+export interface DirectorOverview {
+  eventsByType: {
+    standard: number;
+    premium: number;
+  };
+  activeOrganizers: number;
   ticketsGenerated: number;
-  activeCustomers: number;
-  topOrganizers: { id: string; name: string; tickets: number }[];
-  outstandingDebt: number;
-  recentPayments: PaymentRecord[];
+  updatedAt: string;
 }
 
 export interface OrganizerRecord {
   id: string;
   name: string;
   email: string;
+  phone?: string;
   plan: string;
   ticketsGenerated: number;
-  balance: number;
+  outstandingBalance: number;
+  currency: string;
+  pricePerTicket?: number;
 }
 
-export interface PaymentRecord {
-  id: string;
+export interface ReceivableRecord {
   organizerId: string;
+  organizerName: string;
   amount: number;
   currency: string;
-  processedAt: string;
-  status: 'pending' | 'completed' | 'failed';
+  agingBucket: '0-30' | '31-60' | '61-90' | '90+';
+  lastPaymentAt?: string;
+  lastMovementNote?: string;
 }
 
-export interface PricingUpdatePayload {
+export interface GrantPayload {
+  type: 'prepaid' | 'loan';
+  tickets: number;
+  reference?: string;
+}
+
+export interface PaymentPayload {
+  amount: number;
+  currency: string;
+  paidAt: string;
+  note?: string;
+}
+
+export interface PricingPayload {
   price: number;
   currency: string;
 }
@@ -51,7 +70,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function getDirectorOverview() {
-  return request<KpiOverview>('/director/overview');
+  return request<DirectorOverview>('/director/overview');
 }
 
 export function getDirectorOrganizers(query?: string) {
@@ -59,41 +78,28 @@ export function getDirectorOrganizers(query?: string) {
   return request<OrganizerRecord[]>(`/director/organizers${search}`);
 }
 
-export function grantTickets(organizerId: string, amount: number) {
-  return request<{ granted: number }>(
-    `/director/organizers/${organizerId}/tickets/grant`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ amount }),
-    }
-  );
-}
-
-export function updatePricing(
-  organizerId: string,
-  payload: PricingUpdatePayload
-) {
-  return request<OrganizerRecord>(
-    `/director/organizers/${organizerId}/pricing`,
-    {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }
-  );
-}
-
-export function getPayments() {
-  return request<PaymentRecord[]>(`/director/payments`);
-}
-
-export function createPayment(payload: {
-  organizerId: string;
-  amount: number;
-  currency: string;
-  reference: string;
-}) {
-  return request<PaymentRecord>('/director/payments', {
+export function grantTickets(organizerId: string, payload: GrantPayload) {
+  return request<{ granted: number }>(`/director/organizers/${organizerId}/tickets`, {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+export function recordPayment(organizerId: string, payload: PaymentPayload) {
+  return request<{ balance: number }>(`/director/organizers/${organizerId}/payments`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updatePricing(organizerId: string, payload: PricingPayload) {
+  return request<OrganizerRecord>(`/director/organizers/${organizerId}/pricing`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getReceivables(aging?: ReceivableRecord['agingBucket']) {
+  const query = aging ? `?aging=${encodeURIComponent(aging)}` : '';
+  return request<ReceivableRecord[]>(`/director/receivables${query}`);
 }

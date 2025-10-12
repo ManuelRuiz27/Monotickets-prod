@@ -1,86 +1,203 @@
 'use client';
 
 import React from 'react';
-import { createEvent, EventDetail, addGuest } from '../../../../lib/api/organizer';
-import { StepGeneral } from './_components/StepGeneral';
-import { StepBranding } from './_components/StepBranding';
+import {
+  createEvent,
+  addGuest,
+  generateWhatsappLink,
+  sendBulkWhatsapp,
+  invalidateCaches,
+  CreateEventPayload,
+  Guest,
+} from '../../../../lib/api/organizer';
+import { StepCover, CoverData } from './_components/StepCover';
 import { StepGuests, GuestDraft } from './_components/StepGuests';
-import { colors, spacing, typography, cardStyles } from '../../../../shared/theme';
+import { StepWhatsApp } from './_components/StepWhatsApp';
+import { colors, spacing, typography, cardStyles, buttonStyles } from '../../../../shared/theme';
 
-const steps = ['General', 'Branding', 'Invitados'] as const;
+const steps = ['Portada y landing', 'Invitados', 'WhatsApp'] as const;
 
 type Step = (typeof steps)[number];
 
 const cardStyle = parseStyles(cardStyles);
+const primaryButton = parseStyles(buttonStyles.primary);
+const secondaryButton = parseStyles(buttonStyles.secondary);
 
 export default function NewEventPage() {
   const [stepIndex, setStepIndex] = React.useState(0);
-  const [eventData, setEventData] = React.useState<Partial<EventDetail>>({
+  const [coverData, setCoverData] = React.useState<CoverData>({
+    name: '',
+    description: '',
+    location: '',
+    startDate: '',
+    endDate: '',
     type: 'standard',
-    landing_ttl_days: 7,
+    coverUrl: '',
+    pdfUrl: '',
+    flipbookUrl: '',
+    landingUrl: '',
+    landingTtlDays: 7,
   });
-  const [guests, setGuests] = React.useState<GuestDraft[]>([]);
+  const [guestDrafts, setGuestDrafts] = React.useState<GuestDraft[]>([]);
+  const [createdEventId, setCreatedEventId] = React.useState<string | null>(null);
+  const [createdGuests, setCreatedGuests] = React.useState<Guest[]>([]);
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
 
   const currentStep = steps[stepIndex];
 
-  const goNext = () => setStepIndex((index) => Math.min(index + 1, steps.length - 1));
-  const goPrevious = () => setStepIndex((index) => Math.max(index - 1, 0));
+  const goPrevious = () => {
+    setStepIndex((index) => Math.max(index - 1, 0));
+  };
 
-  const handleSubmit = async () => {
-    setLoading(true);
-    setStatusMessage(null);
-    try {
-      const created = await createEvent(eventData);
-      if (guests.length > 0) {
-        for (const guest of guests) {
-          await addGuest(created.id, { name: guest.name, email: guest.email });
-        }
+  const handleNext = async () => {
+    if (stepIndex === 0) {
+      setStepIndex(1);
+      return;
+    }
+    if (stepIndex === 1) {
+      if (createdEventId) {
+        setStepIndex(2);
+        return;
       }
-      setStatusMessage('Evento creado correctamente. Puedes enviar invitaciones desde el panel.');
-      setEventData({ type: 'standard', landing_ttl_days: 7 });
-      setGuests([]);
-      setStepIndex(0);
-    } catch (error) {
-      setStatusMessage(
-        error instanceof Error ? `Ocurrió un error al crear el evento: ${error.message}` : 'Error inesperado'
-      );
-    } finally {
-      setLoading(false);
+      const hasErrors = guestDrafts.some((guest) => guest.error);
+      if (hasErrors) {
+        setStatusMessage('Corrige los invitados marcados en rojo antes de continuar.');
+        return;
+      }
+      setLoading(true);
+      try {
+        const payload: CreateEventPayload = {
+          name: coverData.name,
+          description: coverData.description,
+          location: coverData.location,
+          start_date: coverData.startDate,
+          end_date: coverData.endDate || undefined,
+          type: coverData.type,
+          cover_url: coverData.coverUrl || undefined,
+          pdf_url: coverData.pdfUrl || undefined,
+          flipbook_url: coverData.flipbookUrl || undefined,
+          landing_url: coverData.landingUrl || undefined,
+          landing_ttl_days: coverData.landingTtlDays,
+        };
+        const created = await createEvent(payload);
+        const addedGuests = await Promise.all(
+          guestDrafts.map((guest) =>
+            addGuest(created.id, {
+              name: guest.name,
+              email: guest.email,
+              phone: guest.phone,
+            })
+          )
+        );
+        setCreatedEventId(created.id);
+        setCreatedGuests(addedGuests);
+        setStatusMessage('Evento guardado. Genera tus enlaces de WhatsApp a continuación.');
+        setStepIndex(2);
+      } catch (error) {
+        setStatusMessage(
+          error instanceof Error ? `No pudimos crear el evento: ${error.message}` : 'Ocurrió un error inesperado'
+        );
+      } finally {
+        setLoading(false);
+      }
+      return;
     }
   };
+
+  const handleFinish = async () => {
+    if (!createdEventId) {
+      setStatusMessage('Crea el evento antes de finalizar.');
+      return;
+    }
+    try {
+      await invalidateCaches(createdEventId);
+      setStatusMessage('¡Listo! El evento quedó configurado y las vistas fueron actualizadas.');
+      setStepIndex(0);
+      setCoverData({
+        name: '',
+        description: '',
+        location: '',
+        startDate: '',
+        endDate: '',
+        type: 'standard',
+        coverUrl: '',
+        pdfUrl: '',
+        flipbookUrl: '',
+        landingUrl: '',
+        landingTtlDays: 7,
+      });
+      setGuestDrafts([]);
+      setCreatedEventId(null);
+      setCreatedGuests([]);
+    } catch (error) {
+      setStatusMessage(
+        error instanceof Error ? `No se pudo limpiar la caché: ${error.message}` : 'Error desconocido al finalizar'
+      );
+    }
+  };
+
+  const handleGenerateLink = React.useCallback(
+    async (guestId?: string) => {
+      if (!createdEventId) return null;
+      return generateWhatsappLink(createdEventId, guestId);
+    },
+    [createdEventId]
+  );
+
+  const handleSendWhatsapp = React.useCallback(async () => {
+    if (!createdEventId) return null;
+    return sendBulkWhatsapp(createdEventId);
+  }, [createdEventId]);
 
   return (
     <main aria-labelledby="new-event-title" style={{ padding: spacing.xl }}>
       <h1 id="new-event-title" style={titleStyle}>
         Nuevo evento
       </h1>
+      <p style={subtitleStyle}>
+        Configura la landing pública, agrega invitados y prepara la campaña de WhatsApp en tres pasos.
+      </p>
       <nav aria-label="Progreso del wizard" style={{ marginBottom: spacing.lg }}>
-        <ol style={{ display: 'flex', gap: spacing.md, listStyle: 'none', padding: 0 }}>
+        <ol style={stepListStyle}>
           {steps.map((step, index) => (
-            <li key={step} style={{ fontFamily: typography.subtitle, color: index === stepIndex ? colors.navy : colors.lightGray }}>
-              {index + 1}. {step}
+            <li
+              key={step}
+              aria-current={index === stepIndex ? 'step' : undefined}
+              style={{
+                ...stepItemStyle,
+                borderColor: index === stepIndex ? colors.sky : 'transparent',
+                color: index === stepIndex ? colors.navy : colors.lightGray,
+              }}
+            >
+              <span style={stepNumberStyle}>{index + 1}</span> {step}
             </li>
           ))}
         </ol>
       </nav>
       <section style={cardStyle}>
-        {currentStep === 'General' && <StepGeneral value={eventData} onChange={setEventData} />}
-        {currentStep === 'Branding' && <StepBranding value={eventData} onChange={setEventData} />}
-        {currentStep === 'Invitados' && <StepGuests guests={guests} onGuestsChange={setGuests} />}
+        {currentStep === 'Portada y landing' && <StepCover value={coverData} onChange={setCoverData} />}
+        {currentStep === 'Invitados' && <StepGuests guests={guestDrafts} onGuestsChange={setGuestDrafts} />}
+        {currentStep === 'WhatsApp' && (
+          <StepWhatsApp
+            eventId={createdEventId}
+            guests={createdGuests}
+            onGenerateLink={handleGenerateLink}
+            onSendBulk={handleSendWhatsapp}
+          />
+        )}
       </section>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: spacing.lg }}>
-        <button type="button" onClick={goPrevious} disabled={stepIndex === 0}>
+        <button type="button" onClick={goPrevious} disabled={stepIndex === 0} style={secondaryButton}>
           Anterior
         </button>
         {stepIndex < steps.length - 1 ? (
-          <button type="button" onClick={goNext}>
-            Siguiente
+          <button type="button" onClick={handleNext} style={primaryButton} disabled={loading}>
+            {loading ? 'Guardando…' : 'Siguiente'}
           </button>
         ) : (
-          <button type="button" onClick={handleSubmit} disabled={loading}>
-            {loading ? 'Creando…' : 'Finalizar'}
+          <button type="button" onClick={handleFinish} style={primaryButton}>
+            Finalizar
           </button>
         )}
       </div>
@@ -96,6 +213,41 @@ export default function NewEventPage() {
 const titleStyle: React.CSSProperties = {
   fontFamily: typography.title,
   color: colors.navy,
+};
+
+const subtitleStyle: React.CSSProperties = {
+  fontFamily: typography.body,
+  color: colors.lightGray,
+  marginBottom: spacing.lg,
+};
+
+const stepListStyle: React.CSSProperties = {
+  display: 'flex',
+  gap: spacing.md,
+  listStyle: 'none',
+  padding: 0,
+  margin: 0,
+};
+
+const stepItemStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: spacing.xs,
+  fontFamily: typography.subtitle,
+  padding: `${spacing.xs} ${spacing.sm}`,
+  borderRadius: '12px',
+  border: `2px solid transparent`,
+};
+
+const stepNumberStyle: React.CSSProperties = {
+  width: '28px',
+  height: '28px',
+  borderRadius: '999px',
+  background: colors.sky,
+  color: colors.white,
+  display: 'grid',
+  placeItems: 'center',
+  fontSize: '0.9rem',
 };
 
 function parseStyles(inline: string): React.CSSProperties {
