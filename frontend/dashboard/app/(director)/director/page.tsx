@@ -1,59 +1,56 @@
 'use client';
 
 import React from 'react';
-import { getDirectorOverview, KpiOverview } from '../../../lib/api/director';
-import { colors, spacing, typography, cardStyles } from '../../../shared/theme';
-import { KpiCards } from '../_components/KpiCards';
-
-const cardStyle = parseStyles(cardStyles);
+import { getDirectorOverview, DirectorOverview } from '../../../lib/api/director';
+import { colors, spacing, typography } from '../../../shared/theme';
+import { KpiSummary } from '../_components/KpiSummary';
 
 export default function DirectorOverviewPage() {
-  const [overview, setOverview] = React.useState<KpiOverview | null>(null);
+  const [overview, setOverview] = React.useState<DirectorOverview | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
 
-  React.useEffect(() => {
-    let cancelled = false;
-    getDirectorOverview()
-      .then((data) => {
-        if (cancelled) return;
-        setOverview(data);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setError(err.message);
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await getDirectorOverview();
+      setOverview(data);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No pudimos obtener los indicadores');
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  React.useEffect(() => {
+    load();
+  }, [load]);
 
   return (
     <main aria-labelledby="director-overview-title" style={{ padding: spacing.xl }}>
-      <h1 id="director-overview-title" style={titleStyle}>
-        Panel del director
-      </h1>
+      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.md }}>
+        <div>
+          <h1 id="director-overview-title" style={titleStyle}>
+            Panel del director
+          </h1>
+          <p style={subtitleStyle}>Resumen ejecutivo de la operación comercial.</p>
+        </div>
+        <button type="button" onClick={load} style={refreshButtonStyle}>
+          Actualizar
+        </button>
+      </header>
       {error && (
-        <div role="alert" style={{ color: colors.danger, marginBottom: spacing.md }}>
-          No se pudieron cargar los indicadores. {error}
+        <div role="alert" style={alertStyle}>
+          {error}
         </div>
       )}
-      {loading && <p>Cargando métricas…</p>}
-      <KpiCards overview={overview ?? undefined} />
-      <section style={{ ...cardStyle, marginTop: spacing.lg }}>
-        <h2 style={sectionTitle}>Top organizadores</h2>
-        <ol>
-          {overview?.topOrganizers?.map((org) => (
-            <li key={org.id} style={{ fontFamily: typography.body }}>
-              {org.name} — {org.tickets} tickets
-            </li>
-          )) ?? <li>No hay datos disponibles.</li>}
-        </ol>
-      </section>
+      <KpiSummary overview={overview} loading={loading} />
+      {overview && (
+        <p style={footnoteStyle}>
+          Última actualización: {new Date(overview.updatedAt).toLocaleString()}
+        </p>
+      )}
     </main>
   );
 }
@@ -61,18 +58,36 @@ export default function DirectorOverviewPage() {
 const titleStyle: React.CSSProperties = {
   fontFamily: typography.title,
   color: colors.navy,
+  margin: 0,
 };
 
-const sectionTitle: React.CSSProperties = {
+const subtitleStyle: React.CSSProperties = {
+  fontFamily: typography.body,
+  color: colors.lightGray,
+  margin: 0,
+};
+
+const refreshButtonStyle: React.CSSProperties = {
+  padding: `${spacing.xs} ${spacing.sm}`,
+  borderRadius: '12px',
+  border: `1px solid ${colors.sky}`,
+  backgroundColor: colors.white,
+  color: colors.sky,
   fontFamily: typography.subtitle,
-  color: colors.navy,
 };
 
-function parseStyles(inline: string): React.CSSProperties {
-  return inline.split(';').reduce<React.CSSProperties>((acc, declaration) => {
-    const [property, rawValue] = declaration.split(':').map((part) => part.trim());
-    if (!property || !rawValue) return acc;
-    const camelCaseProperty = property.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-    return { ...acc, [camelCaseProperty]: rawValue };
-  }, {});
-}
+const alertStyle: React.CSSProperties = {
+  marginTop: spacing.md,
+  marginBottom: spacing.md,
+  padding: spacing.md,
+  borderRadius: '12px',
+  backgroundColor: 'rgba(239, 71, 111, 0.12)',
+  color: colors.danger,
+  fontFamily: typography.body,
+};
+
+const footnoteStyle: React.CSSProperties = {
+  marginTop: spacing.lg,
+  fontFamily: typography.body,
+  color: colors.lightGray,
+};
