@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- (2025-10-12) Updated `infra/docker-compose.yml` to serve as the single source of
+  truth for dev/staging, adding PWA/Dashboard services with healthchecks and
+  documented orchestration details in `docs/compose-source-of-truth.md`.
+- (2025-10-12) Added environment templates, artifact storage volumes, and
+  documented secrets/volume handling (`env/.env.*.example`, `.env.example`,
+  `docs/docker-env.md`, `docs/secrets-setup.md`, `docs/artifacts-storage.md`,
+  `infra/docker-compose.yml`).
+- (2025-10-12) Expanded observability guidance and alert examples, including JSON
+  logging defaults and Prometheus rules (`env/.env.local.example`,
+  `docs/observability.md`, `infra/monitoring/alerts.examples/latency-error-dlq.yml`).
+- (2025-10-12) Updated CI/CD workflows to run smoke/E2E checks, build PWA/Dashboard
+  images, and document staging deploy steps (`.github/workflows/*.yml`,
+  `infra/scripts/deploy_staging.sh`, `docs/cicd.md`, `docs/deploy-staging.md`).
 - Added structured logging with optional JSON format and Prometheus histogram
   metrics (`backend/src/server.js`, `backend/src/logging.js`).
 - Documented secrets inventory and setup instructions (`docs/secrets-setup.md`,

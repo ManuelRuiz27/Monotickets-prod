@@ -7,9 +7,9 @@ This document summarises the workflow topology and required secrets.
 
 | Workflow | File | Trigger | Purpose |
 | --- | --- | --- | --- |
-| CI | `.github/workflows/ci.yml` | `pull_request` → `develop`, `main` | Runs lint, unit tests, and TestSprite. Produces the `testsprite-report` artifact. |
-| Build & Push | `.github/workflows/build-and-push.yml` | `push` to `develop`/`main`; `workflow_run` (CI success) | Builds Docker images (`backend-api`, `workers`, `frontend`) and pushes them to the registry. |
-| Deploy Staging | `.github/workflows/deploy-staging.yml` | `workflow_run` (Build & Push success); `workflow_dispatch` | Deploys the latest image tag to the staging host after validating TestSprite status. |
+| CI | `.github/workflows/ci.yml` | `pull_request` → `develop`, `main` | Runs lint, unit, smoke (`infra/docker-compose.yml`) and host-based E2E (`npm run test:e2e:all`) before executing TestSprite. |
+| Build & Push | `.github/workflows/build-and-push.yml` | `push` to `develop`/`main`; `workflow_run` (CI success) | Builds Docker images (`backend-api`, `workers`, `frontend`, `pwa`, `dashboard`) and pushes them to the registry. |
+| Deploy Staging | `.github/workflows/deploy-staging.yml` | `workflow_run` (Build & Push success); `workflow_dispatch` | Deploys the latest image tag to the staging host after validating smoke, E2E, and TestSprite status. |
 
 ## Image tagging
 
@@ -17,6 +17,9 @@ This document summarises the workflow topology and required secrets.
 - Commits on `main` also publish the `latest` tag for rapid rollbacks.
 - The deploy workflow references `github.event.workflow_run.head_sha` to select
   the image tag.
+- Service map:
+  - `backend-api`, `workers` → `./backend/Dockerfile`
+  - `frontend`, `pwa`, `dashboard` → `./frontend/Dockerfile` (runtime decided via env/entry).
 
 ## Secrets & variables
 
@@ -29,6 +32,16 @@ This document summarises the workflow topology and required secrets.
 
 Refer to `docs/secrets-setup.md` for CLI commands to seed these values.
 
+### Smoke & E2E execution
+
+- The smoke job boots `database`, `redis`, `backend-api`, `pwa`, and `dashboard`
+  via `infra/docker-compose.yml` with `COMPOSE_PROFILES=dev`.
+- Readiness checks rely on `npm run smoke:readiness` and `npm run smoke:services`
+  targeting `http://localhost:8080`, `http://localhost:3000`, and
+  `http://localhost:3100`.
+- The E2E job reuses the same stack and executes `npm run test:e2e:all`, then
+  runs `npm run test:post` to gather coverage and E2E artifacts.
+
 ## Manual deploys
 
 Use the **Deploy Staging** workflow → **Run workflow** in GitHub Actions to force
@@ -37,7 +50,7 @@ SHA (defaults to latest successful Build & Push run).
 
 ## Promotion checklist
 
-1. Ensure the CI workflow is green (TestSprite included).
+1. Ensure the CI workflow is green (lint, unit, smoke, E2E, TestSprite).
 2. Confirm Build & Push completed for the target commit.
 3. Trigger or wait for Deploy Staging. Monitor the logs in GitHub Actions.
 4. Validate staging health endpoints:

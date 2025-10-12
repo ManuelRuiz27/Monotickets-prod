@@ -105,11 +105,19 @@ jobs:
           BACKEND_TAGS="${REGISTRY_NAMESPACE}/backend-api:${SHA}"
           WORKER_TAGS="${REGISTRY_NAMESPACE}/workers:${SHA}"
           FRONTEND_TAGS="${REGISTRY_NAMESPACE}/frontend:${SHA}"
+          # BEGIN devops-ci
+          PWA_TAGS="${REGISTRY_NAMESPACE}/pwa:${SHA}"
+          DASHBOARD_TAGS="${REGISTRY_NAMESPACE}/dashboard:${SHA}"
+          # END devops-ci
 
           if [ "$BRANCH" = "main" ]; then
             BACKEND_TAGS="$BACKEND_TAGS\n${REGISTRY_NAMESPACE}/backend-api:latest"
             WORKER_TAGS="$WORKER_TAGS\n${REGISTRY_NAMESPACE}/workers:latest"
             FRONTEND_TAGS="$FRONTEND_TAGS\n${REGISTRY_NAMESPACE}/frontend:latest"
+            # BEGIN devops-ci
+            PWA_TAGS="$PWA_TAGS\n${REGISTRY_NAMESPACE}/pwa:latest"
+            DASHBOARD_TAGS="$DASHBOARD_TAGS\n${REGISTRY_NAMESPACE}/dashboard:latest"
+            # END devops-ci
           fi
 
           {
@@ -122,6 +130,14 @@ jobs:
             echo "frontend<<EOF"
             printf "%s\n" "$FRONTEND_TAGS"
             echo "EOF"
+            # BEGIN devops-ci
+            echo "pwa<<EOF"
+            printf "%s\n" "$PWA_TAGS"
+            echo "EOF"
+            echo "dashboard<<EOF"
+            printf "%s\n" "$DASHBOARD_TAGS"
+            echo "EOF"
+            # END devops-ci
           } >> "$GITHUB_OUTPUT"
 
       - name: Build & push backend-api image
@@ -150,6 +166,29 @@ jobs:
           file: ./frontend/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.frontend }}
+      # BEGIN devops-ci
+      - name: Build & push PWA image
+        if: steps.ci_gate.outputs.build == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          build-args: |
+            FRONTEND_APP=pwa
+          tags: ${{ steps.meta.outputs.pwa }}
+
+      - name: Build & push dashboard image
+        if: steps.ci_gate.outputs.build == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          build-args: |
+            FRONTEND_APP=dashboard
+          tags: ${{ steps.meta.outputs.dashboard }}
+      # END devops-ci
 
       - name: Build skipped notice
         if: steps.ci_gate.outputs.build != 'true'

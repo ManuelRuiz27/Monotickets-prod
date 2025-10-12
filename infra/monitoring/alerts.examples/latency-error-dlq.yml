@@ -1,0 +1,41 @@
+# Example Alertmanager rules for Monotickets
+# Copy into your Alertmanager/Prometheus configuration before enabling.
+
+# Latency thresholds
+- alert: BackendP95LatencyHigh
+  expr: histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket{path="/scan/validate"}[5m])) by (le)) > 0.3
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "P95 latency high on /scan/validate"
+    description: "95th percentile latency is {{ $value }}s (>300ms). Investigate backend performance."
+
+- alert: BackendP99LatencyHigh
+  expr: histogram_quantile(0.99, sum(rate(http_request_duration_ms_bucket{path=~"/events/.+"}[5m])) by (le, path)) > 0.5
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "P99 latency high on events routes"
+    description: "99th percentile latency {{ $value }}s on {{ $labels.path }}."
+
+# Error budget
+- alert: Backend5xxErrorRate
+  expr: sum(rate(http_request_duration_ms_count{status=~"5.."}[5m])) / sum(rate(http_request_duration_ms_count[5m])) > 0.02
+  for: 10m
+  labels:
+    severity: critical
+  annotations:
+    summary: "HTTP 5xx rate > 2%"
+    description: "More than 2% of requests are returning 5xx responses."
+
+# Dead letter queue
+- alert: DeliveryDeadLetterBacklog
+  expr: monotickets_dead_letter_jobs > 10
+  for: 15m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Dead letter queue backlog"
+    description: "Dead letter queue has {{ $value }} jobs pending. Investigate worker failures."

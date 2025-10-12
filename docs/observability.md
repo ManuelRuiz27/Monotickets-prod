@@ -5,7 +5,8 @@ covers structured logs, metrics, dashboards, and alert recommendations.
 
 ## Structured logging
 
-- Set `LOG_FORMAT=json` in `.env` to switch backend and worker logs to JSON.
+- Set `LOG_FORMAT=json` in `.env` (or the templates under `env/`) to switch
+  backend and worker logs to JSON.
 - Each log entry includes:
   - `ts`: ISO 8601 timestamp (UTC).
   - `level`: log severity (`info`, `warn`, `error`, `fatal`).
@@ -17,6 +18,13 @@ covers structured logs, metrics, dashboards, and alert recommendations.
   developer ergonomics.
 - Loki pipelines (see `infra/monitoring/loki.example.yml`) parse JSON payloads to
   expose keys as labels (`{service="backend-api"}`) for querying.
+- Force correlation IDs in ad-hoc calls with:
+
+  ```bash
+  curl -H "x-request-id: demo-123" http://localhost:8080/events/demo-event/guests
+  ```
+
+  The same `demo-123` identifier will appear in logs for downstream worker jobs.
 
 ## Metrics
 
@@ -28,6 +36,17 @@ covers structured logs, metrics, dashboards, and alert recommendations.
   project name changes.
 - Workers currently only emit logs; instrument queue length gauges in future
   iterations if BullMQ is introduced.
+
+Key queries:
+
+- `histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket{path="/scan/validate"}[5m])) by (le))`
+  → p95 latency for QR validation.
+- `histogram_quantile(0.99, sum(rate(http_request_duration_ms_bucket{path=~"/events/.+"}[5m])) by (le, path))`
+  → p99 latency for events APIs.
+- `sum(rate(http_request_duration_ms_count{status=~"5.."}[5m]))`
+  → aggregate HTTP error rate.
+- `monotickets_dead_letter_jobs` → gauge emitted by workers when DLQ support is
+  enabled (currently stubbed via logs/alerts example).
 
 ### Scraping instructions
 

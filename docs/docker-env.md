@@ -2,6 +2,11 @@
 
 This guide documents the environment configuration required to run the Monotickets stack locally via `infra/docker-compose.yml`.
 
+# [devops/env-update]
+- Templates: `env/.env.local.example` (local) and `env/.env.staging.example` (staging).
+- Secrets referenced as `GITHUB_SECRET:<NAME>` must exist in GitHub Secrets before CI/CD runs.
+- Keep `LOG_FORMAT`, storage buckets, and API base URLs synchronized across the templates and `.env.example`.
+
 ## Core Application
 
 | Variable | Description | Default |
