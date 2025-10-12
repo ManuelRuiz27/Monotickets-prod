@@ -10,6 +10,11 @@ DB_NAME=${DB_NAME:-monotickets}
 DB_USER=${DB_USER:-postgres}
 DB_PASSWORD=${DB_PASSWORD:-postgres}
 
+if ! command -v psql >/dev/null 2>&1; then
+  echo "Error: psql no está instalado o no está en el PATH. Instala el cliente de PostgreSQL o ejecuta este script dentro del contenedor database." >&2
+  exit 1
+fi
+
 run_sql() {
   local file=$1
   echo "Applying ${file##*/}"

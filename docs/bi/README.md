@@ -1,44 +1,44 @@
-# Metabase para analistas
+# Metabase para analistas (servicio opcional)
 
-Metabase ofrece un espacio rápido para construir dashboards operativos sobre la base de datos de Monotickets. Este servicio es opcional y se levanta desde Docker Compose.
+Metabase es el contenedor de BI ligero del stack de Monotickets. Permite explorar las tablas operativas, las bitácoras de envíos y las vistas materializadas de KPIs sin exponer credenciales en el repositorio.
 
 ## Puesta en marcha
 
-1. Levanta Metabase junto con Postgres:
+1. Asegúrate de tener la base de datos levantada (ver `docs/db/README.md`). Después inicia Metabase:
 
    ```bash
-   docker compose up -d database metabase
+   docker compose -f infra/docker-compose.yml up -d database metabase
    ```
 
-   - Metabase quedará disponible en [http://localhost:3002](http://localhost:3002).
-   - El metastore se guarda en el volumen `metabase_data`, por lo que las configuraciones sobreviven reinicios del contenedor.
+   - El servicio se expone en [http://localhost:3002](http://localhost:3002).
+   - El metastore se guarda en el volumen `metabase_data` (`MB_DB_FILE=/metabase-data/metabase.db`).
 
-2. Primer inicio de sesión:
-   - Al abrir la URL por primera vez, crea una cuenta de administrador para el equipo de datos.
-   - Cuando Metabase pregunte por la base de datos a conectar, utiliza los parámetros definidos en tu `.env` (mismos que `infra/scripts/seed.sh`). Ejemplo:
+2. Onboarding inicial:
+   - Crea el usuario administrador cuando Metabase lo solicite.
+   - Configura una conexión PostgreSQL apuntando al mismo host que usa el backend (variables de `.env`):
      - **Host**: `database`
-     - **Puerto**: `5432`
-     - **Base de datos**: `monotickets`
-     - **Usuario**: `postgres`
-     - **Contraseña**: la misma que usas en desarrollo (definida en `DB_PASSWORD`).
-   - Si prefieres configurar la conexión después, ve a *Admin settings → Databases* y agrega una nueva conexión tipo PostgreSQL.
+     - **Puerto**: `${DB_PORT:-5432}`
+     - **Base de datos**: `${DB_NAME:-monotickets}`
+     - **Usuario**: `${DB_USER:-postgres}`
+     - **Contraseña**: `${DB_PASSWORD}`
+   - También puedes omitir la conexión en el onboarding y agregarla después en *Admin settings → Databases*.
 
-## Configuración recomendada
+## Colecciones y tarjetas de ejemplo
 
-1. Crea la colección `Monotickets – Operación` para agrupar tarjetas y dashboards operativos.
-2. Desde la vista de datos, crea las primeras tarjetas sugeridas:
-   - Conteo de invitados por `status` (tabla `guests`).
-   - Conteo de `scan_logs` en los últimos 7 días segmentado por `result`.
-3. Comparte la colección con los organizadores interesados y documenta brevemente el propósito de cada tarjeta en la descripción.
+1. Crea la colección **“Monotickets – Operación”**.
+2. Publica las primeras tarjetas demo sobre los datos sembrados:
+   - **Guests por status (hoy)**: usa la tabla `guests`, filtra por `date_trunc('day', created_at) = current_date` y agrupa por `status`.
+   - **Scan logs últimos 7 días por result**: tabla `scan_logs`, filtra por `ts >= now() - interval '7 days'` y agrupa por `result`.
+3. Documenta en la descripción de la colección qué supuestos cubren las tarjetas (e.g., la semilla incluye eventos standard y premium con show-up del 60–80%).
 
 ## Buenas prácticas de dashboard
 
-- **Foco diario**: utiliza filtros por rango de fechas (día, semana, mes) para que los organizadores identifiquen confirmaciones y show-up recientes.
-- **Drill-down**: enlaza tablas detalladas que permitan saltar desde indicadores agregados a los registros de invitados o bitácoras de envío cuando detecten anomalías.
-- **Mensajes**: diferencia entre plantillas y mensajes de sesión (gratuitos) usando el campo `template` de `delivery_logs` para monitorear consumos y errores.
-- **Rendimiento**: crea vistas o modelos con agregaciones simples si notas que los dashboards tardan en cargar; la semilla incluida debería responder instantáneamente en local.
+- **Foco diario**: aplica filtros rápidos (hoy, últimos 7 días) para validar confirmaciones y show-up recientes.
+- **Drill-down**: enlaza tablas detalladas que permitan auditar invitados, invitaciones y delivery logs directamente desde los indicadores.
+- **WhatsApp gratuito**: mientras llega el modelo de `wa_sessions`, usa el campo `assumption` de `mv_wa_free_ratio_daily` para aclarar la heurística de 24h.
+- **Rendimiento**: las vistas materializadas (`mv_*`) soportan `REFRESH MATERIALIZED VIEW CONCURRENTLY`; evita consultas pesadas directamente sobre `scan_logs` históricos.
 
 ## Próximos pasos
 
-- Automatiza la creación de tarjetas clave (confirmaciones vs. pending, ratio de show-up, tasa de entrega de WhatsApp) mediante la API de Metabase o plantillas.
-- Para necesidades de dirección ejecutiva, considera integrar Superset o herramientas adicionales sobre vistas materializadas.
+- Automatiza la creación de dashboards mediante la API de Metabase cuando las tarjetas cambien con frecuencia.
+- Para análisis ejecutivos considera compartir vistas de `mv_event_mix_90d` y `mv_organizer_debt` en dashboards dedicados (ver `docs/bi/metabase-dashboards.md`).
