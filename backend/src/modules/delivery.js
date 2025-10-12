@@ -6,22 +6,133 @@ import { ensureRedis } from '../redis/client.js';
 const DEFAULT_CHANNEL = 'whatsapp';
 const SUPPORTED_CHANNELS = new Set(['whatsapp', 'email']);
 const DEFAULT_TEMPLATE = 'event_invitation';
+const DEFAULT_ORGANIZER = '00000000-0000-0000-0000-000000000000';
+const DEFAULT_DEDUPE_WINDOW_MINUTES = 1440;
+const DEDUPE_PREFIX = 'delivery:dedupe';
 
 export function createDeliveryModule(options = {}) {
   const { env = process.env, queuesPromise, logger } = options;
   if (!queuesPromise) {
     throw new Error('queuesPromise is required for delivery module');
   }
-  const log = logger || ((payload) => console.log(JSON.stringify(payload)));
 
-  async function enqueueSend({ eventId, guestId, body = {}, requestId }) {
-    const channel = selectChannel(body?.channel);
-    const template = body?.template || DEFAULT_TEMPLATE;
-    const organizerId = body?.organizerId || env.DEFAULT_ORGANIZER_ID || '00000000-0000-0000-0000-000000000000';
-    if (!body?.organizerId && !env.DEFAULT_ORGANIZER_ID) {
-      log({ level: 'warn', message: 'delivery_missing_organizer', event_id: eventId, guest_id: guestId });
+  const log = logger || ((payload) => console.log(JSON.stringify(payload)));
+  const dedupeWindowMinutes = Number(env.DELIVERY_DEDUPE_WINDOW_MIN || DEFAULT_DEDUPE_WINDOW_MINUTES);
+
+  async function send({ body = {}, requestId }) {
+    const eventId = normalizeId(body.eventId || body.event_id);
+    const guestIds = collectGuestIds(body);
+    const channel = selectChannel(body.channel);
+    const template = typeof body.template === 'string' ? body.template : DEFAULT_TEMPLATE;
+    const organizerId = normalizeId(body.organizerId || env.DEFAULT_ORGANIZER_ID || DEFAULT_ORGANIZER);
+    const payload = typeof body.payload === 'object' && body.payload !== null ? body.payload : {};
+
+    if (!eventId) {
+      return { statusCode: 400, payload: { error: 'event_id_required' } };
     }
-    const payload = body?.payload || {};
+
+    if (guestIds.length === 0) {
+      return { statusCode: 400, payload: { error: 'guest_ids_required' } };
+    }
+
+    const results = [];
+    for (const guestId of guestIds) {
+      try {
+        const result = await enqueueOutbound({
+          eventId,
+          guestId,
+          organizerId,
+          channel,
+          template,
+          payload,
+          requestId,
+          metadata: body.metadata,
+        });
+        results.push(result);
+      } catch (error) {
+        log({
+          level: 'error',
+          message: 'delivery_send_failed',
+          error: error.message,
+          event_id: eventId,
+          guest_id: guestId,
+          request_id: requestId,
+        });
+        results.push({ guestId, status: 'failed', error: 'enqueue_failed' });
+      }
+    }
+
+    const queuedCount = results.filter((item) => item.status === 'queued').length;
+    return {
+      statusCode: queuedCount > 0 ? 202 : 200,
+      payload: {
+        status: queuedCount > 0 ? 'queued' : results[0]?.status || 'ok',
+        deliveries: results,
+      },
+    };
+  }
+
+  async function enqueueLegacySend({ eventId, guestId, body = {}, requestId }) {
+    const organizerId = normalizeId(body.organizerId || env.DEFAULT_ORGANIZER_ID || DEFAULT_ORGANIZER);
+    const channel = selectChannel(body.channel);
+    const template = typeof body.template === 'string' ? body.template : DEFAULT_TEMPLATE;
+    const payload = typeof body.payload === 'object' && body.payload !== null ? body.payload : {};
+
+    const result = await enqueueOutbound({
+      eventId,
+      guestId,
+      organizerId,
+      channel,
+      template,
+      payload,
+      requestId,
+      metadata: body.metadata,
+    });
+
+    return {
+      statusCode: result.status === 'queued' ? 202 : 200,
+      payload: {
+        status: result.status,
+        jobId: result.jobId,
+        deliveryLogId: result.deliveryLogId,
+        duplicateOf: result.duplicateOf,
+      },
+    };
+  }
+
+  async function enqueueOutbound({
+    eventId,
+    guestId,
+    organizerId,
+    channel,
+    template,
+    payload,
+    requestId,
+    metadata,
+  }) {
+    const redis = await ensureRedis({ name: 'delivery-dedupe', env });
+    const dedupeKey = buildDedupeKey({ eventId, guestId, template });
+    const dedupeValue = requestId || randomUUID();
+    const dedupeTtlSeconds = Math.max(60, dedupeWindowMinutes * 60);
+
+    const dedupeResult = await redis.set(dedupeKey, dedupeValue, 'NX', 'EX', dedupeTtlSeconds);
+    if (dedupeResult !== 'OK') {
+      const existing = await findRecentDeliveryLog({ eventId, guestId, template, windowMinutes: dedupeWindowMinutes });
+      log({
+        level: 'info',
+        message: 'delivery_deduped',
+        event_id: eventId,
+        guest_id: guestId,
+        template,
+        request_id: requestId,
+        duplicate_of: existing?.id || null,
+      });
+      return {
+        guestId,
+        status: 'duplicate',
+        duplicateOf: existing?.id || null,
+      };
+    }
 
     let deliveryLogId;
     try {
@@ -44,6 +155,7 @@ export function createDeliveryModule(options = {}) {
     }
 
     const queues = await queuesPromise;
+    const outboundQueue = queues.waOutboundQueue || queues.deliveryQueue;
     const jobPayload = {
       deliveryLogId,
       eventId,
@@ -52,19 +164,31 @@ export function createDeliveryModule(options = {}) {
       channel,
       template,
       payload,
+      metadata: sanitizeMetadata(metadata),
       requestId,
+    };
+
+    const jobOptions = {
+      attempts: Number(env.DELIVERY_MAX_RETRIES || 5),
+      backoff: { type: 'exponential', delay: Number(env.QUEUE_BACKOFF_DELAY_MS || 5000) },
+      removeOnComplete: true,
+      removeOnFail: false,
+      jobId: `delivery:${guestId}:${template}:${Date.now()}`,
     };
 
     let job;
     try {
-      job = await queues.deliveryQueue.add('send', jobPayload, {
-        attempts: 5,
-        backoff: { type: 'exponential', delay: Number(env.DELIVERY_BACKOFF_DELAY_MS || 5000) },
-        removeOnComplete: true,
-        removeOnFail: false,
-      });
+      job = await outboundQueue.add('send', jobPayload, jobOptions);
     } catch (error) {
-      log({ level: 'error', message: 'delivery_enqueue_failed', error: error.message, event_id: eventId, guest_id: guestId });
+      await redis.del(dedupeKey);
+      log({
+        level: 'error',
+        message: 'delivery_enqueue_failed',
+        error: error.message,
+        event_id: eventId,
+        guest_id: guestId,
+        request_id: requestId,
+      });
       if (deliveryLogId) {
         await query(
           `UPDATE delivery_logs SET status = 'failed', error = $1::jsonb, updated_at = now() WHERE id = $2`,
@@ -86,17 +210,16 @@ export function createDeliveryModule(options = {}) {
     });
 
     return {
-      statusCode: 202,
-      payload: {
-        status: 'queued',
-        jobId: job.id,
-        deliveryLogId,
-      },
+      guestId,
+      status: 'queued',
+      jobId: job.id,
+      deliveryLogId,
     };
   }
 
   async function enqueueWebhook({ body = {}, requestId }) {
     const queues = await queuesPromise;
+    const inboundQueue = queues.waInboundQueue;
     const jobPayload = {
       webhookId: randomUUID(),
       payload: body,
@@ -104,8 +227,8 @@ export function createDeliveryModule(options = {}) {
       requestId,
     };
 
-    const job = await queues.waInboundQueue.add('wa-webhook', jobPayload, {
-      attempts: 5,
+    const job = await inboundQueue.add('wa-webhook', jobPayload, {
+      attempts: Number(env.DELIVERY_MAX_RETRIES || 5),
       backoff: { type: 'exponential', delay: Number(env.WA_WEBHOOK_BACKOFF_DELAY_MS || 2000) },
       removeOnComplete: true,
       removeOnFail: false,
@@ -121,6 +244,30 @@ export function createDeliveryModule(options = {}) {
     return {
       statusCode: 200,
       payload: { ok: true, jobId: job.id },
+    };
+  }
+
+  async function getStatus({ deliveryId }) {
+    if (!deliveryId) {
+      return { statusCode: 400, payload: { error: 'delivery_id_required' } };
+    }
+
+    const lookup = await findDeliveryStatus(deliveryId);
+    if (!lookup) {
+      return { statusCode: 404, payload: { error: 'not_found' } };
+    }
+
+    return {
+      statusCode: 200,
+      payload: {
+        deliveryId: lookup.id,
+        status: lookup.status,
+        channel: lookup.channel,
+        template: lookup.template,
+        providerRef: lookup.provider_ref,
+        error: lookup.error,
+        updatedAt: lookup.updated_at,
+      },
     };
   }
 
@@ -191,9 +338,11 @@ export function createDeliveryModule(options = {}) {
   }
 
   return {
-    enqueueSend,
+    send,
+    enqueueLegacySend,
     enqueueWebhook,
     getSession,
+    getStatus,
   };
 }
 
@@ -206,4 +355,71 @@ function selectChannel(channel) {
 
 function getSessionKey(phone) {
   return `wa:session:${phone}`;
+}
+
+function collectGuestIds(body) {
+  if (Array.isArray(body.guestIds)) {
+    return body.guestIds.filter((id) => typeof id === 'string').map((id) => id.trim()).filter(Boolean);
+  }
+  if (Array.isArray(body.guests)) {
+    return body.guests
+      .map((item) => (typeof item === 'string' ? item : item?.id))
+      .filter((id) => typeof id === 'string')
+      .map((id) => id.trim())
+      .filter(Boolean);
+  }
+  if (typeof body.guestId === 'string' && body.guestId.trim()) {
+    return [body.guestId.trim()];
+  }
+  if (typeof body.guest_id === 'string' && body.guest_id.trim()) {
+    return [body.guest_id.trim()];
+  }
+  return [];
+}
+
+function normalizeId(value) {
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+  return null;
+}
+
+function buildDedupeKey({ eventId, guestId, template }) {
+  return `${DEDUPE_PREFIX}:${eventId || 'unknown'}:${guestId || 'unknown'}:${template}`;
+}
+
+async function findRecentDeliveryLog({ eventId, guestId, template, windowMinutes }) {
+  const interval = Math.max(1, Number(windowMinutes || DEFAULT_DEDUPE_WINDOW_MINUTES));
+  const result = await query(
+    `SELECT id, status
+       FROM delivery_logs
+      WHERE event_id = $1 AND guest_id = $2 AND template = $3 AND created_at >= now() - ($4 || ' minutes')::interval
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [eventId, guestId, template, interval],
+  ).catch(() => ({ rowCount: 0 }));
+  return result?.rows?.[0] || null;
+}
+
+async function findDeliveryStatus(identifier) {
+  if (/^\d+$/.test(identifier)) {
+    const result = await query('SELECT * FROM delivery_logs WHERE id = $1', [Number(identifier)]);
+    return result.rows[0] || null;
+  }
+  const result = await query(
+    `SELECT * FROM delivery_logs WHERE provider_ref = $1 ORDER BY updated_at DESC LIMIT 1`,
+    [identifier],
+  );
+  return result.rows[0] || null;
+}
+
+function sanitizeMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+  try {
+    return JSON.parse(JSON.stringify(metadata));
+  } catch (error) {
+    return null;
+  }
 }
