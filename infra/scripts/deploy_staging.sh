@@ -46,8 +46,17 @@ docker login "$REGISTRY_HOST" --username "$REGISTRY_USERNAME" --password "$REGIS
 docker pull "$REGISTRY_URL/backend-api:$IMAGE_TAG"
 docker pull "$REGISTRY_URL/workers:$IMAGE_TAG"
 docker pull "$REGISTRY_URL/frontend:$IMAGE_TAG"
+# BEGIN devops-ci
+docker pull "$REGISTRY_URL/pwa:$IMAGE_TAG" || true
+docker pull "$REGISTRY_URL/dashboard:$IMAGE_TAG" || true
+# END devops-ci
 
-docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d backend-api workers frontend
+SERVICES="backend-api workers frontend"
+# BEGIN devops-ci
+SERVICES="$SERVICES pwa dashboard"
+# END devops-ci
+
+docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d $SERVICES
 SCRIPT
 
 ssh ${SSH_OPTS} -i "$SSH_PRIVATE_KEY_PATH" "$SSH_USER@$SSH_HOST" \

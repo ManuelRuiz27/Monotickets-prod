@@ -4,6 +4,11 @@ Use this guide to populate the secrets required by CI/CD and the staging
 deployment workflow. Prefer the GitHub CLI (`gh`) when available; otherwise use
 the GitHub web UI.
 
+# [devops/env-update]
+- Align secret names with the placeholders in `env/.env.staging.example`.
+- For local testing with GitHub CLI, inject temporary values via `gh secret set --env staging`.
+- Avoid pasting secrets into `.env.example`; use the templates under `env/`.
+
 ## Required secrets
 
 | Secret name | Purpose |

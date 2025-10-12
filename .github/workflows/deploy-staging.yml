@@ -76,12 +76,17 @@ jobs:
               run_id: run.id,
               per_page: 50,
             });
-            const testsprite = jobs.data.jobs.find((job) => job.name === 'TestSprite QA');
-            if (!testsprite || testsprite.conclusion !== 'success') {
-              core.setFailed('TestSprite QA did not succeed; aborting deploy.');
-              return;
+            // BEGIN devops-ci
+            const requiredJobs = ['Smoke', 'E2E', 'TestSprite QA'];
+            for (const jobName of requiredJobs) {
+              const job = jobs.data.jobs.find((entry) => entry.name === jobName);
+              if (!job || job.conclusion !== 'success') {
+                core.setFailed(`${jobName} did not succeed; aborting deploy.`);
+                return;
+              }
             }
-            core.info(`CI and TestSprite succeeded for ${sha}.`);
+            // END devops-ci
+            core.info(`CI checks (lint, unit, smoke, e2e, TestSprite) succeeded for ${sha}.`);
 
       - name: Checkout repository
         uses: actions/checkout@v4
