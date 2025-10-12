@@ -38,52 +38,72 @@ export interface Seeds {
   staff: StaffSeed;
 }
 
+function envString(name: string, fallback: string): string {
+  const value = process.env[name];
+  if (!value) {
+    return fallback;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function envNumber(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const defaultEventId = envString('SCAN_EVENT_ID', 'demo-event');
+
 export const seeds: Seeds = {
   delivery: {
-    eventId: 'demo-event',
+    eventId: defaultEventId,
     success: {
-      phone: '+34123456789',
-      template: 'ticket_confirmation',
-      locale: 'es-ES',
+      phone: envString('WA_SUCCESS_PHONE', '+34123456789'),
+      template: envString('WA_TEMPLATE_SUCCESS', 'ticket_confirmation'),
+      locale: envString('WA_TEMPLATE_LOCALE', 'es-ES'),
       metadata: {
-        ticketCode: 'MONO-QR-0001',
+        ticketCode: envString('SCAN_QR_VALID', 'MONO-QR-0001'),
         channel: 'whatsapp',
       },
     },
     expiredWindow: {
-      phone: '+34999999999',
-      template: 'ticket_followup',
-      locale: 'es-ES',
+      phone: envString('WA_EXPIRED_PHONE', '+34999999999'),
+      template: envString('WA_TEMPLATE_EXPIRED', 'ticket_followup'),
+      locale: envString('WA_TEMPLATE_LOCALE', 'es-ES'),
       metadata: {
-        ticketCode: 'MONO-QR-9999',
+        ticketCode: envString('SCAN_QR_EXPIRED', 'MONO-QR-ARCHIVED'),
         reason: 'window_expired',
       },
     },
     transientFailure: {
-      phone: '+34111111111',
-      template: 'ticket_reminder',
-      locale: 'es-ES',
+      phone: envString('WA_RETRY_PHONE', '+34111111111'),
+      template: envString('WA_TEMPLATE_RETRY', 'ticket_reminder'),
+      locale: envString('WA_TEMPLATE_LOCALE', 'es-ES'),
       metadata: {
-        ticketCode: 'MONO-QR-0002',
+        ticketCode: envString('SCAN_QR_DUP', 'MONO-QR-0001-DUP'),
         retryGroup: 'wa-delivery',
       },
     },
   },
   directorMetrics: {
-    confirmed: 2,
-    showUp: 1,
-    deliveries: 3,
-    lastUpdated: new Date().toISOString(),
+    confirmed: envNumber('DIRECTOR_METRIC_CONFIRMED', 2),
+    showUp: envNumber('DIRECTOR_METRIC_SHOWUP', 1),
+    deliveries: envNumber('DIRECTOR_METRIC_DELIVERIES', 3),
+    lastUpdated: envString('DIRECTOR_METRIC_UPDATED_AT', new Date().toISOString()),
   },
   qr: {
-    valid: 'MONO-QR-0001',
-    duplicate: 'MONO-QR-0001-DUP',
-    invalid: 'NOT-A-QR',
-    expiredEvent: 'MONO-QR-ARCHIVED',
+    valid: envString('SCAN_QR_VALID', 'MONO-QR-0001'),
+    duplicate: envString('SCAN_QR_DUP', 'MONO-QR-0001-DUP'),
+    invalid: envString('SCAN_QR_INVALID', 'NOT-A-QR'),
+    expiredEvent: envString('SCAN_QR_EXPIRED', 'MONO-QR-ARCHIVED'),
   },
   staff: {
-    token: 'STAFF-TOKEN-001',
-    location: 'main-gate',
+    token: envString('STAFF_TOKEN', 'STAFF-TOKEN-001'),
+    location: envString('STAFF_LOCATION', 'main-gate'),
   },
 };
 

@@ -27,15 +27,27 @@ jobs:
       - name: Start services
         run: docker compose up -d database redis backend-api dashboard pwa
       - name: Wait for readiness
-        run: npm run smoke:readiness
+        run: |
+          set -o pipefail
+          mkdir -p reports/smoke
+          npm run smoke:readiness 2>&1 | tee reports/smoke/readiness.log
         env:
           BACKEND_URL: http://backend:8080/health
           FRONTEND_URL: http://frontend:3001/
       - name: Smoke check services
-        run: npm run smoke:services
+        run: |
+          set -o pipefail
+          mkdir -p reports/smoke
+          npm run smoke:services 2>&1 | tee reports/smoke/services.log
         env:
           BACKEND_URL: http://backend:8080/health
           FRONTEND_URL: http://frontend:3001/
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs
+          path: reports/smoke
       - name: Tear down services
         if: always()
         run: docker compose down
@@ -53,7 +65,10 @@ jobs:
       - name: Start dependencies
         run: docker compose up -d database redis backend-api dashboard pwa
       - name: Wait for readiness
-        run: npm run smoke:readiness
+        run: |
+          set -o pipefail
+          mkdir -p reports/smoke
+          npm run smoke:readiness 2>&1 | tee reports/smoke/readiness-e2e.log
         env:
           BACKEND_URL: http://backend:8080/health
           FRONTEND_URL: http://frontend:3001/
@@ -86,6 +101,12 @@ jobs:
           path: tests/artifacts/**
           if-no-files-found: warn
           retention-days: 10
+      - name: Upload readiness logs (e2e)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs-e2e
+          path: reports/smoke
       - name: Tear down services
         if: always()
         run: docker compose down
