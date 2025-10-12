@@ -15,13 +15,18 @@ export async function createQueues(options = {}) {
     removeOnFail: false,
   };
 
-  const delivery = await createSimpleQueue(env.DELIVERY_QUEUE_NAME || 'deliveryQueue', {
+  const outboundQueueName = env.WA_OUTBOUND_QUEUE_NAME || env.DELIVERY_QUEUE_NAME || 'wa_outbound';
+  const inboundQueueName = env.WA_INBOUND_QUEUE_NAME || 'wa_inbound';
+  const delivery = await createSimpleQueue(outboundQueueName, {
     logger,
     connectionOptions,
-    defaultJobOptions,
+    defaultJobOptions: {
+      ...defaultJobOptions,
+      attempts: Number(env.DELIVERY_MAX_RETRIES || defaultJobOptions.attempts),
+    },
   });
 
-  const waInbound = await createSimpleQueue(env.WA_INBOUND_QUEUE_NAME || 'waInboundQueue', {
+  const waInbound = await createSimpleQueue(inboundQueueName, {
     logger,
     connectionOptions,
     defaultJobOptions,
@@ -36,6 +41,8 @@ export async function createQueues(options = {}) {
   return {
     deliveryQueue: delivery.queue,
     deliveryEvents: delivery.events,
+    waOutboundQueue: delivery.queue,
+    waOutboundEvents: delivery.events,
     waInboundQueue: waInbound.queue,
     waInboundEvents: waInbound.events,
     paymentsQueue: payments.queue,

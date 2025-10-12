@@ -12,6 +12,8 @@ import { createQueues } from './queues/index.js';
 import { createDeliveryModule } from './modules/delivery.js';
 import { createDirectorModule } from './modules/director.js';
 import { createPaymentsModule } from './modules/payments.js';
+import { query } from './db/index.js';
+import { ensureRedis } from './redis/client.js';
 
 const DEFAULT_APP_ENV = 'development';
 const HISTOGRAM_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
@@ -97,6 +99,27 @@ export function createServer(options = {}) {
         return sendJson(res, 200, { status: 'ok', env: env.APP_ENV || DEFAULT_APP_ENV });
       }
 
+      if (method === 'POST' && url.pathname === '/deliver/send') {
+        const body = await readJsonBody(req, logger);
+        const { statusCode, payload } = await deliveryModule.send({ body, requestId });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'POST' && url.pathname === '/deliver/webhook') {
+        const body = await readJsonBody(req, logger);
+        const { statusCode, payload } = await deliveryModule.enqueueWebhook({
+          body,
+          requestId,
+        });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'GET' && /^\/deliver\/.+\/status$/.test(url.pathname)) {
+        const deliveryId = url.pathname.split('/')[2];
+        const { statusCode, payload } = await deliveryModule.getStatus({ deliveryId });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
       if (
         method === 'POST' &&
         /^\/events\/[^/]+\/guests\/[^/]+\/send$/.test(url.pathname)
@@ -104,18 +127,9 @@ export function createServer(options = {}) {
         const [, , eventId, , guestId] = url.pathname.split('/');
         requestContext.eventId = eventId;
         const body = await readJsonBody(req, logger);
-        const { statusCode, payload } = await deliveryModule.enqueueSend({
+        const { statusCode, payload } = await deliveryModule.enqueueLegacySend({
           eventId,
           guestId,
-          body,
-          requestId,
-        });
-        return sendJson(res, statusCode, { ...payload, requestId });
-      }
-
-      if (method === 'POST' && url.pathname === '/wa/webhook') {
-        const body = await readJsonBody(req, logger);
-        const { statusCode, payload } = await deliveryModule.enqueueWebhook({
           body,
           requestId,
         });
@@ -138,9 +152,21 @@ export function createServer(options = {}) {
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
+      if (method === 'POST' && url.pathname === '/director/assign') {
+        const body = await readJsonBody(req, logger);
+        const { statusCode, payload } = await directorModule.assignTickets({ body, requestId });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'GET' && /^\/director\/organizers\/.+\/ledger$/.test(url.pathname)) {
+        const organizerId = url.pathname.split('/')[3];
+        const { statusCode, payload } = await directorModule.getOrganizerLedger({ organizerId });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
       if (method === 'POST' && url.pathname === '/director/payments') {
         const body = await readJsonBody(req, logger);
-        const { statusCode, payload } = await directorModule.registerPayment({ body, requestId });
+        const { statusCode, payload } = await directorModule.recordPayment({ body, requestId });
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
@@ -178,15 +204,67 @@ export function createServer(options = {}) {
 
       if (method === 'POST' && url.pathname === '/scan/validate') {
         const body = await readJsonBody(req, logger);
-        const { code = '', eventId = '' } = body;
+        const code = typeof body.code === 'string' ? body.code.trim() : '';
+        const eventId = typeof body.eventId === 'string' ? body.eventId.trim() : '';
         requestContext.eventId = eventId || undefined;
-        const hash = Array.from(`${code}:${eventId}`).reduce(
-          (acc, char) => acc + char.charCodeAt(0),
-          0,
-        );
-        const statuses = ['valid', 'duplicate', 'invalid'];
-        const status = statuses[hash % statuses.length];
-        return sendJson(res, 200, { status, requestId });
+
+        if (!code || !eventId) {
+          return sendJson(res, 400, { error: 'code_and_event_required', requestId });
+        }
+
+        const lockToken = randomUUID();
+        const redis = await ensureRedis({ name: 'scan-locks', env });
+        const lockKey = `scan:lock:${eventId}:${code}`;
+        const lockTtlMs = Number(env.SCAN_LOCK_TTL_MS || 1500);
+        const lockResult = await redis.set(lockKey, lockToken, 'NX', 'PX', lockTtlMs);
+        if (lockResult !== 'OK') {
+          return sendJson(res, 409, { status: 'in_progress', requestId });
+        }
+
+        try {
+          const inviteResult = await query(
+            `SELECT invites.id AS invite_id, invites.guest_id, guests.status, guests.event_id
+               FROM invites
+               JOIN guests ON guests.id = invites.guest_id
+              WHERE invites.code = $1 AND invites.event_id = $2
+              LIMIT 1`,
+            [code, eventId],
+          );
+
+          if (inviteResult.rowCount === 0) {
+            await appendScanLog({ eventId, guestId: null, result: 'invalid', device: body.device });
+            return sendJson(res, 200, { status: 'invalid', requestId });
+          }
+
+          const invite = inviteResult.rows[0];
+          if (!['confirmed', 'scanned'].includes(invite.status)) {
+            await appendScanLog({ eventId, guestId: invite.guest_id, result: 'invalid', device: body.device });
+            return sendJson(res, 200, { status: 'invalid', reason: 'not_confirmed', requestId });
+          }
+
+          if (invite.status === 'scanned') {
+            await appendScanLog({ eventId, guestId: invite.guest_id, result: 'duplicate', device: body.device });
+            return sendJson(res, 200, { status: 'duplicate', requestId });
+          }
+
+          const updateResult = await query(
+            `UPDATE guests
+                SET status = 'scanned'
+              WHERE id = $1 AND status = 'confirmed'
+              RETURNING id`,
+            [invite.guest_id],
+          );
+
+          const finalStatus = updateResult.rowCount > 0 ? 'valid' : 'duplicate';
+          await appendScanLog({ eventId, guestId: invite.guest_id, result: finalStatus === 'valid' ? 'valid' : 'duplicate', device: body.device });
+
+          return sendJson(res, 200, { status: finalStatus, requestId });
+        } finally {
+          const current = await redis.get(lockKey);
+          if (current === lockToken) {
+            await redis.del(lockKey);
+          }
+        }
       }
 
       if (method === 'POST' && url.pathname === '/auth/login') {
@@ -372,6 +450,29 @@ export function log(payload, { logger = defaultLogger } = {}) {
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(payload));
+}
+
+async function appendScanLog({ eventId, guestId, result, device }) {
+  if (!eventId || !guestId) {
+    return;
+  }
+  const devicePayload = sanitizeDevice(device);
+  await query(
+    `INSERT INTO scan_logs (event_id, guest_id, result, device)
+     VALUES ($1, $2, $3, $4::jsonb)`,
+    [eventId, guestId, result, devicePayload],
+  );
+}
+
+function sanitizeDevice(device) {
+  if (!device || typeof device !== 'object') {
+    return null;
+  }
+  try {
+    return JSON.stringify(device);
+  } catch (error) {
+    return null;
+  }
 }
 
 function readBody(req) {

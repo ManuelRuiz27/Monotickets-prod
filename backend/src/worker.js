@@ -10,8 +10,8 @@ import { runLandingTtlJob } from './jobs/landing-ttl.js';
 const env = process.env;
 const logger = createLogger({ env, service: env.SERVICE_NAME || 'workers' });
 
-const deliveryQueueName = env.DELIVERY_QUEUE_NAME || 'deliveryQueue';
-const waInboundQueueName = env.WA_INBOUND_QUEUE_NAME || 'waInboundQueue';
+const deliveryQueueName = env.WA_OUTBOUND_QUEUE_NAME || env.DELIVERY_QUEUE_NAME || 'wa_outbound';
+const waInboundQueueName = env.WA_INBOUND_QUEUE_NAME || 'wa_inbound';
 const paymentsQueueName = env.PAYMENTS_QUEUE_NAME || 'paymentsQueue';
 
 const whatsappBreaker = new CircuitBreaker({
@@ -192,6 +192,19 @@ async function processWaWebhook(data) {
   const redis = await ensureRedis({ name: 'wa-sessions', env });
   await redis.set(`wa:session:${contact}`, 'open', 'EX', Number(env.WA_SESSION_TTL_SECONDS || 24 * 3600));
 
+  const inboundMessages = Array.isArray(payload.messages) ? payload.messages : [];
+  for (const message of inboundMessages) {
+    const messageId = message?.id || message?.message_id || null;
+    if (messageId) {
+      const dedupeTtl = Number(env.WA_INBOUND_DEDUPE_TTL_SECONDS || 3 * 24 * 3600);
+      const dedupeResult = await redis.set(`wa:inbound:${messageId}`, data.webhookId, 'NX', 'EX', dedupeTtl);
+      if (dedupeResult !== 'OK') {
+        continue;
+      }
+    }
+    await handleInboundMessage({ message, contact, webhook: data, env });
+  }
+
   const statusUpdates = Array.isArray(payload.statuses) ? payload.statuses : [];
   for (const status of statusUpdates) {
     if (!status?.id) continue;
@@ -226,12 +239,15 @@ async function sendWhatsAppMessage({ guest, template, payload }) {
     throw new Error('wa_circuit_open');
   }
 
-  const apiKey = env.WA_360DIALOG_API_KEY;
-  const apiUrl = env.WA_360DIALOG_API_URL || 'https://waba.360dialog.io/v1/messages';
+  const apiKey = env.WA_API_TOKEN || env.WA_360DIALOG_API_KEY;
+  const apiBase = env.WA_API_BASE ? env.WA_API_BASE.replace(/\/$/, '') : '';
+  const apiUrl =
+    env.WA_360DIALOG_API_URL ||
+    (apiBase ? `${apiBase}/v1/messages` : 'https://waba.360dialog.io/v1/messages');
 
   if (!apiKey) {
     whatsappBreaker.success();
-    logger({ level: 'warn', message: 'wa_send_simulated', guest_id: guest.id });
+    logger({ level: 'warn', message: 'wa_send_simulated', guest_id: guest.id, simulated: true });
     return { providerRef: `wa-sim-${randomUUID()}`, status: 'sent' };
   }
 
@@ -352,6 +368,12 @@ function mapWhatsappStatus(status) {
   }
 }
 
+async function invalidateLandingCache(eventId, env) {
+  if (!eventId) return;
+  const redis = await ensureRedis({ name: 'landing-cache', env });
+  await redis.del(`landing:${eventId}`, `landing:dashboard:${eventId}`);
+}
+
 async function handleStripeWebhook(payload = {}) {
   const eventType = payload.type || payload.event || '';
   const object = payload.data?.object || {};
@@ -398,6 +420,54 @@ async function handleMockWebhook(payload = {}) {
     `UPDATE payments SET status = 'succeeded', provider_ref = $1, confirmed_at = now(), updated_at = now() WHERE provider_ref = $1`,
     [providerRef],
   );
+}
+
+async function handleInboundMessage({ message = {}, contact, webhook, env }) {
+  const text = extractMessageText(message);
+  if (!text) {
+    return;
+  }
+
+  if (!/confirm/i.test(text)) {
+    return;
+  }
+
+  const guestResult = await query(
+    `SELECT id, status, event_id
+       FROM guests
+      WHERE phone = $1
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [contact],
+  );
+
+  if (guestResult.rowCount === 0) {
+    logger({ level: 'info', message: 'wa_inbound_guest_not_found', phone: contact, webhook_id: webhook.webhookId });
+    return;
+  }
+
+  const guest = guestResult.rows[0];
+  if (guest.status === 'pending') {
+    await query(
+      `UPDATE guests
+          SET status = 'confirmed',
+              confirmation_payload = jsonb_build_object('source', 'whatsapp', 'webhookId', $2, 'messageId', $3, 'receivedAt', $4)
+        WHERE id = $1`,
+      [guest.id, webhook.webhookId, message.id || null, webhook.receivedAt || new Date().toISOString()],
+    );
+    await invalidateLandingCache(guest.event_id, env);
+    logger({ level: 'info', message: 'guest_confirmed_from_wa', guest_id: guest.id, event_id: guest.event_id });
+  }
+}
+
+function extractMessageText(message = {}) {
+  if (typeof message.text === 'string') return message.text;
+  if (typeof message.body === 'string') return message.body;
+  if (typeof message?.text?.body === 'string') return message.text.body;
+  if (Array.isArray(message.messages) && message.messages[0]?.text) {
+    return message.messages[0].text;
+  }
+  return '';
 }
 
 function normalizeStripeStatus(status) {

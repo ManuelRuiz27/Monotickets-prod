@@ -3,10 +3,193 @@ import { ensureRedis } from '../redis/client.js';
 
 const CACHE_KEY_OVERVIEW = 'director:overview';
 const CACHE_TTL_SECONDS = 45;
+const DEFAULT_PREMIUM_FACTOR = 2;
 
 export function createDirectorModule(options = {}) {
   const { env = process.env, logger } = options;
   const log = logger || ((payload) => console.log(JSON.stringify(payload)));
+  const premiumFactor = Math.max(1, Number(env.TICKET_PREMIUM_FACTOR || DEFAULT_PREMIUM_FACTOR));
+
+  async function assignTickets({ body = {}, requestId }) {
+    const organizerId = normalizeId(body.organizerId || body.organizer_id);
+    const eventId = normalizeId(body.eventId || body.event_id);
+    const type = (body.type || 'prepaid').toLowerCase();
+    const tickets = Number(body.tickets || 0);
+    const price = Number(body.price || 0);
+    const metadata = sanitizeMetadata(body.metadata);
+
+    if (!organizerId) {
+      return { statusCode: 400, payload: { error: 'organizer_id_required' } };
+    }
+    if (!eventId) {
+      return { statusCode: 400, payload: { error: 'event_id_required' } };
+    }
+    if (!['prepaid', 'loan'].includes(type)) {
+      return { statusCode: 400, payload: { error: 'invalid_type' } };
+    }
+    if (!Number.isFinite(tickets) || tickets <= 0) {
+      return { statusCode: 400, payload: { error: 'invalid_tickets' } };
+    }
+
+    const eventInfo = await loadEvent(eventId);
+    if (!eventInfo) {
+      return { statusCode: 404, payload: { error: 'event_not_found' } };
+    }
+
+    const equivalentTickets = computeEquivalentTickets({ tickets, eventType: eventInfo.type, premiumFactor });
+    const unitPriceCents = Math.max(0, Math.round(price * 100));
+    const amountCents = unitPriceCents * tickets;
+    const entryType = type === 'loan' ? 'assign_loan' : 'assign_prepaid';
+
+    const result = await query(
+      `INSERT INTO director_ledger_entries (
+         organizer_id, event_id, entry_type, tickets, tickets_equivalent,
+         unit_price_cents, amount_cents, currency, metadata
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+       RETURNING id, created_at`,
+      [
+        organizerId,
+        eventId,
+        entryType,
+        tickets,
+        equivalentTickets,
+        unitPriceCents,
+        amountCents,
+        (body.currency || 'mxn').toLowerCase(),
+        JSON.stringify(metadata || {}),
+      ],
+    );
+
+    await invalidateOverviewCache(env);
+
+    const summary = await loadLedgerSummary(organizerId);
+    log({
+      level: 'info',
+      message: 'director_assignment_recorded',
+      organizer_id: organizerId,
+      event_id: eventId,
+      entry_id: result.rows[0]?.id,
+      tickets,
+      tickets_equivalent: equivalentTickets,
+      request_id: requestId,
+    });
+
+    return {
+      statusCode: 201,
+      payload: {
+        entryId: result.rows[0]?.id,
+        organizerId,
+        eventId,
+        tickets,
+        ticketsEquivalent: equivalentTickets,
+        amountCents,
+        entryType,
+        createdAt: result.rows[0]?.created_at,
+        totals: summary,
+      },
+    };
+  }
+
+  async function getOrganizerLedger({ organizerId }) {
+    const id = normalizeId(organizerId);
+    if (!id) {
+      return { statusCode: 400, payload: { error: 'organizer_id_required' } };
+    }
+
+    const [entriesResult, summary] = await Promise.all([
+      query(
+        `SELECT id, event_id, entry_type, tickets, tickets_equivalent, unit_price_cents,
+                amount_cents, currency, metadata, created_at
+           FROM director_ledger_entries
+          WHERE organizer_id = $1
+          ORDER BY created_at DESC
+          LIMIT 200`,
+        [id],
+      ),
+      loadLedgerSummary(id),
+    ]);
+
+    return {
+      statusCode: 200,
+      payload: {
+        organizerId: id,
+        totals: summary,
+        entries: entriesResult.rows.map(mapLedgerEntry),
+      },
+    };
+  }
+
+  async function recordPayment({ body = {}, requestId }) {
+    const amount = Number(body.amount || 0);
+    const currency = (body.currency || 'mxn').toLowerCase();
+    const eventId = normalizeId(body.eventId || body.event_id);
+    const organizerId = normalizeId(body.organizerId || body.organizer_id);
+    const provider = body.provider || 'manual';
+    const metadata = sanitizeMetadata(body.metadata) || {};
+
+    if (!organizerId) {
+      return { statusCode: 400, payload: { error: 'organizer_id_required' } };
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return { statusCode: 400, payload: { error: 'invalid_amount' } };
+    }
+
+    const amountCents = Math.round(amount * 100);
+    const paymentResult = await query(
+      `INSERT INTO payments (event_id, organizer_id, amount_cents, currency, status, provider, provider_ref, metadata, confirmed_at)
+       VALUES ($1, $2, $3, $4, 'confirmed', $5, $6, $7::jsonb, now())
+       RETURNING id`,
+      [
+        eventId,
+        organizerId,
+        amountCents,
+        currency,
+        provider,
+        body.providerRef || null,
+        JSON.stringify({ ...metadata, requestId }),
+      ],
+    );
+
+    const ledgerResult = await query(
+      `INSERT INTO director_ledger_entries (
+         organizer_id, event_id, entry_type, tickets, tickets_equivalent,
+         unit_price_cents, amount_cents, currency, metadata
+       )
+       VALUES ($1, $2, 'payment', 0, 0, 0, $3, $4, $5::jsonb)
+       RETURNING id, created_at`,
+      [
+        organizerId,
+        eventId,
+        amountCents,
+        currency,
+        JSON.stringify({ ...metadata, paymentId: paymentResult.rows[0]?.id || null }),
+      ],
+    );
+
+    await invalidateOverviewCache(env);
+
+    const summary = await loadLedgerSummary(organizerId);
+    log({
+      level: 'info',
+      message: 'director_payment_recorded',
+      payment_id: paymentResult.rows[0]?.id,
+      entry_id: ledgerResult.rows[0]?.id,
+      organizer_id: organizerId,
+      amount_cents: amountCents,
+      request_id: requestId,
+    });
+
+    return {
+      statusCode: 201,
+      payload: {
+        paymentId: paymentResult.rows[0]?.id,
+        entryId: ledgerResult.rows[0]?.id,
+        status: 'confirmed',
+        totals: summary,
+      },
+    };
+  }
 
   async function getOverview() {
     const redis = await ensureRedis({ name: 'director-cache', env });
@@ -16,111 +199,128 @@ export function createDirectorModule(options = {}) {
       return { statusCode: 200, payload: JSON.parse(cached), headers: { 'x-cache': 'hit' } };
     }
 
-    let confirmRate;
-    let timeToConfirm;
-    let waSessions;
-    let showUp;
-    let landingVisits;
-    let payments;
-
     try {
-      confirmRate = await query(
-        `SELECT coalesce(avg(confirm_rate), 0) AS confirm_rate, coalesce(sum(confirmed_count), 0) AS confirmed,
-                coalesce(sum(total_guests), 0) AS guests
-           FROM mv_kpi_confirm_rate`,
-      );
+      const [tickets, debt, topOrganizers] = await Promise.all([
+        query(
+          `SELECT COALESCE(SUM(tickets_equivalentes), 0) AS tickets_equivalentes,
+                  COALESCE(SUM(valor_asignado_cents), 0) AS valor_asignado_cents
+             FROM mv_kpi_tickets_entregados`,
+        ),
+        query(
+          `SELECT COALESCE(SUM(balance_cents), 0) AS balance_cents
+             FROM mv_kpi_deuda_abierta`,
+        ),
+        query(
+          `SELECT organizer_id, tickets_equivalentes, valor_asignado_cents, ranking
+             FROM mv_kpi_top_organizadores
+             ORDER BY ranking ASC
+             LIMIT 10`,
+        ),
+      ]);
 
-      timeToConfirm = await query(
-        `SELECT coalesce(avg(avg_seconds_to_confirm), 0) AS avg_seconds,
-                coalesce(avg(median_seconds_to_confirm), 0) AS median_seconds
-           FROM mv_kpi_time_to_confirm`,
-      );
+      const overview = {
+        ticketsEquivalentDelivered: Number(tickets.rows[0]?.tickets_equivalentes || 0),
+        assignedValueCents: Number(tickets.rows[0]?.valor_asignado_cents || 0),
+        openDebtCents: Number(debt.rows[0]?.balance_cents || 0),
+        topOrganizers: topOrganizers.rows.map((row) => ({
+          organizerId: row.organizer_id,
+          ticketsEquivalent: Number(row.tickets_equivalentes || 0),
+          assignedValueCents: Number(row.valor_asignado_cents || 0),
+          rank: Number(row.ranking || 0),
+        })),
+        refreshedAt: new Date().toISOString(),
+      };
 
-      waSessions = await query(
-        `SELECT coalesce(avg(active_ratio), 0) AS active_ratio FROM mv_kpi_wa_sessions_ratio`,
-      );
+      await redis.set(CACHE_KEY_OVERVIEW, JSON.stringify(overview), 'EX', ttl);
 
-      showUp = await query(
-        `SELECT coalesce(avg(show_up_rate), 0) AS show_up_rate FROM mv_kpi_show_up_rate`,
-      );
-
-      landingVisits = await query(
-        `SELECT coalesce(sum(total_visits), 0) AS visits_last_30_days FROM mv_kpi_landing_visits`,
-      );
-
-      payments = await query(
-        `SELECT
-           coalesce(sum(CASE WHEN status IN ('confirmed', 'succeeded', 'paid') THEN amount_cents ELSE 0 END), 0) AS confirmed_amount,
-           coalesce(sum(CASE WHEN status = 'pending' THEN amount_cents ELSE 0 END), 0) AS pending_amount
-         FROM payments`,
-      );
+      return { statusCode: 200, payload: overview, headers: { 'x-cache': 'miss' } };
     } catch (error) {
       log({ level: 'error', message: 'director_overview_failed', error: error.message });
       return { statusCode: 503, payload: { error: 'overview_unavailable' } };
     }
-
-    const overview = {
-      confirmRate: Number(confirmRate.rows[0]?.confirm_rate || 0),
-      confirmedGuests: Number(confirmRate.rows[0]?.confirmed || 0),
-      totalGuests: Number(confirmRate.rows[0]?.guests || 0),
-      averageSecondsToConfirm: Number(timeToConfirm.rows[0]?.avg_seconds || 0),
-      medianSecondsToConfirm: Number(timeToConfirm.rows[0]?.median_seconds || 0),
-      waSessionsRatio: Number(waSessions.rows[0]?.active_ratio || 0),
-      showUpRate: Number(showUp.rows[0]?.show_up_rate || 0),
-      landingVisitsLast30Days: Number(landingVisits.rows[0]?.visits_last_30_days || 0),
-      confirmedRevenue: Number(payments.rows[0]?.confirmed_amount || 0) / 100,
-      pendingRevenue: Number(payments.rows[0]?.pending_amount || 0) / 100,
-      refreshedAt: new Date().toISOString(),
-    };
-
-    await redis.set(CACHE_KEY_OVERVIEW, JSON.stringify(overview), 'EX', ttl);
-
-    return { statusCode: 200, payload: overview, headers: { 'x-cache': 'miss' } };
   }
 
-  async function registerPayment({ body = {}, requestId }) {
-    const amount = Number(body.amount || 0);
-    const currency = (body.currency || 'mxn').toLowerCase();
-    const eventId = body.eventId || null;
-    const organizerId = body.organizerId || null;
-    const provider = body.provider || 'manual';
-    const metadata = body.metadata || {};
-
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return { statusCode: 400, payload: { error: 'invalid_amount' } };
-    }
-
-    const amountCents = Math.round(amount * 100);
-    const result = await query(
-      `INSERT INTO payments (event_id, organizer_id, amount_cents, currency, status, provider, provider_ref, metadata, confirmed_at)
-       VALUES ($1, $2, $3, $4, 'confirmed', $5, $6, $7::jsonb, now())
-       RETURNING id`,
-      [eventId, organizerId, amountCents, currency, provider, body.providerRef || null, JSON.stringify(metadata)],
-    );
-
-    const redis = await ensureRedis({ name: 'director-cache', env });
-    await redis.del(CACHE_KEY_OVERVIEW);
-
-    log({
-      level: 'info',
-      message: 'director_payment_registered',
-      payment_id: result.rows[0]?.id,
-      amount_cents: amountCents,
-      event_id: eventId,
-      request_id: requestId,
-    });
-
-    return {
-      statusCode: 201,
-      payload: {
-        paymentId: result.rows[0]?.id,
-        status: 'confirmed',
-      },
-    };
+  async function registerPayment(options) {
+    return recordPayment(options);
   }
 
   return {
-    getOverview,
+    assignTickets,
+    getOrganizerLedger,
+    recordPayment,
     registerPayment,
+    getOverview,
   };
+}
+
+function normalizeId(value) {
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+  return null;
+}
+
+function sanitizeMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+  try {
+    return JSON.parse(JSON.stringify(metadata));
+  } catch (error) {
+    return null;
+  }
+}
+
+async function loadEvent(eventId) {
+  const result = await query('SELECT id, type FROM events WHERE id = $1', [eventId]);
+  return result.rows[0] || null;
+}
+
+function computeEquivalentTickets({ tickets, eventType, premiumFactor }) {
+  if (eventType === 'premium') {
+    return Math.round(tickets * premiumFactor);
+  }
+  return Math.round(tickets);
+}
+
+async function loadLedgerSummary(organizerId) {
+  const result = await query(
+    `SELECT
+        COALESCE(SUM(CASE WHEN entry_type IN ('assign_prepaid', 'assign_loan') THEN tickets_equivalent ELSE 0 END), 0) AS tickets_equivalent,
+        COALESCE(SUM(CASE WHEN entry_type IN ('assign_prepaid', 'assign_loan') THEN amount_cents ELSE 0 END), 0) AS assigned_amount_cents,
+        COALESCE(SUM(CASE WHEN entry_type = 'payment' THEN amount_cents ELSE 0 END), 0) AS payments_cents
+       FROM director_ledger_entries
+      WHERE organizer_id = $1`,
+    [organizerId],
+  );
+
+  const row = result.rows[0] || {};
+  const assigned = Number(row.assigned_amount_cents || 0);
+  const payments = Number(row.payments_cents || 0);
+  return {
+    ticketsEquivalent: Number(row.tickets_equivalent || 0),
+    assignedAmountCents: assigned,
+    paymentsCents: payments,
+    balanceCents: assigned - payments,
+  };
+}
+
+function mapLedgerEntry(row) {
+  return {
+    id: row.id,
+    eventId: row.event_id,
+    entryType: row.entry_type,
+    tickets: Number(row.tickets || 0),
+    ticketsEquivalent: Number(row.tickets_equivalent || 0),
+    unitPriceCents: Number(row.unit_price_cents || 0),
+    amountCents: Number(row.amount_cents || 0),
+    currency: row.currency,
+    metadata: row.metadata || {},
+    createdAt: row.created_at,
+  };
+}
+
+async function invalidateOverviewCache(env) {
+  const redis = await ensureRedis({ name: 'director-cache', env });
+  await redis.del(CACHE_KEY_OVERVIEW);
 }
