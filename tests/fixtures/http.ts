@@ -7,21 +7,27 @@ export interface PollOptions {
   intervalMs?: number;
 }
 
-export async function postJSON<T>(
+export interface JsonRequestOptions {
+  headers?: Record<string, string>;
+  query?: Record<string, string> | URLSearchParams;
+}
+
+export async function postJSON(
   request: APIRequestContext,
   path: string,
   payload: unknown,
+  options: JsonRequestOptions = {},
 ) {
-  const response = await request.post(buildUrl(path), {
+  const response = await request.post(buildUrl(path, options.query), {
     data: payload,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(options.headers || {}) },
   });
   return response;
 }
 
-export async function getJSON<T>(request: APIRequestContext, path: string) {
-  const response = await request.get(buildUrl(path), {
-    headers: { accept: 'application/json' },
+export async function getJSON(request: APIRequestContext, path: string, options: JsonRequestOptions = {}) {
+  const response = await request.get(buildUrl(path, options.query), {
+    headers: { accept: 'application/json', ...(options.headers || {}) },
   });
   return response;
 }
@@ -65,11 +71,25 @@ export async function waitForWebhookReceipt(
   );
 }
 
-export function buildUrl(path: string): string {
+export function buildUrl(path: string, query?: Record<string, string> | URLSearchParams): string {
   if (path.startsWith('http://') || path.startsWith('https://')) {
-    return path;
+    if (!query) {
+      return path;
+    }
+    const url = new URL(path);
+    const params = query instanceof URLSearchParams ? query : new URLSearchParams(query);
+    params.forEach((value, key) => {
+      url.searchParams.set(key, value);
+    });
+    return url.toString();
   }
-  return `${getBackendBaseURL()}${path}`;
+  const base = getBackendBaseURL();
+  const url = new URL(path, base);
+  const params = query instanceof URLSearchParams ? query : new URLSearchParams(query);
+  params.forEach((value, key) => {
+    url.searchParams.set(key, value);
+  });
+  return url.toString();
 }
 
 export async function fireWebhookAck(payload: Record<string, unknown>) {

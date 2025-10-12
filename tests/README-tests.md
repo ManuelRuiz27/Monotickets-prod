@@ -25,14 +25,21 @@ Los directorios anteriores se generan/actualizan después de cada ejecución. Pu
 
 ## Variables de entorno soportadas
 
-| Variable             | Descripción                                               | Valor por defecto                         |
-| -------------------- | --------------------------------------------------------- | ----------------------------------------- |
-| `BASE_URL_FRONTEND`  | URL del frontend a probar                                 | `http://frontend:3001`                    |
-| `BASE_URL_BACKEND`   | URL del backend a probar                                  | `http://backend:3000`                     |
-| `WA_WEBHOOK_URL`     | Webhook simulado para flujos de WhatsApp                  | `http://backend:3000/wa/webhook`          |
-| `TEST_TIMEOUT`       | Timeout máximo por suite (ms)                             | `300000`                                  |
-| `HEADLESS`           | Ejecutar navegadores en modo headless (`1` = sí, `0` = no) | `1`                                       |
-| `CI`                 | Indica ejecución en entorno CI                            | `1`                                       |
+| Variable               | Descripción                                                                       | Valor por defecto                |
+| ---------------------- | --------------------------------------------------------------------------------- | -------------------------------- |
+| `BASE_URL_FRONTEND`    | URL del frontend a probar                                                         | `http://frontend:3001`           |
+| `BASE_URL_BACKEND`     | URL del backend a probar                                                          | `http://backend:3000`            |
+| `WA_WEBHOOK_URL`       | Webhook simulado para flujos de WhatsApp                                          | `http://backend:3000/wa/webhook` |
+| `TEST_TIMEOUT`         | Timeout máximo por suite (ms)                                                     | `300000`                         |
+| `HEADLESS`             | Ejecutar navegadores en modo headless (`1` = sí, `0` = no)                       | `1`                              |
+| `CI`                   | Indica ejecución en entorno CI                                                    | `1`                              |
+| `STAFF_TOKEN`          | Token de staff autorizado para `/scan/validate`                                   | `STAFF-TOKEN-001`                |
+| `STAFF_LOCATION`       | Ubicación del staff que acompaña los escaneos                                     | `main-gate`                      |
+| `SCAN_QR_VALID`        | Código QR válido para flujos felices                                               | `MONO-QR-0001`                   |
+| `SCAN_QR_DUP`          | Código QR ya consumido/duplicado                                                   | `MONO-QR-0001-DUP`               |
+| `SCAN_QR_INVALID`      | Código QR inválido (formato erróneo o inexistente)                                | `NOT-A-QR`                       |
+| `SCAN_QR_EXPIRED`      | QR asociado a evento expirado                                                      | `MONO-QR-ARCHIVED`               |
+| `WA_SESSION_IN_WINDOW` | Bandera para simular ventana gratuita de WhatsApp (`true` = dentro, `false` = fuera) | `true`                           |
 
 Exporta las variables anteriores antes de ejecutar el contenedor si necesitas personalizarlas.
 
@@ -40,13 +47,13 @@ Exporta las variables anteriores antes de ejecutar el contenedor si necesitas pe
 
 Los flujos E2E se organizan por tags. Puedes ejecutarlos de forma selectiva con los siguientes scripts:
 
-| Script                         | Tags ejecutados           | Descripción                                     |
-| ------------------------------ | ------------------------- | ----------------------------------------------- |
-| `npm run test:e2e:guest`       | `@confirm`                | Flujo de invitado: confirmación desde landing   |
-| `npm run test:e2e:staff`       | `@scan`                   | Flujo de staff: escaneo y validaciones          |
-| `npm run test:e2e:wa`          | `@wa`                     | Flujos previos de organizadores/WhatsApp        |
-| `npm run test:e2e:delivery`    | `@delivery`               | Módulo Delivery (WhatsApp/colas/webhook)        |
-| `npm run test:e2e:director`    | `@director`, `@kpi`       | Panel Director (overview, KPIs y regresiones)   |
+| Script                         | Tags ejecutados                    | Descripción                                             |
+| ------------------------------ | ---------------------------------- | ------------------------------------------------------- |
+| `npm run test:e2e:guest`       | `@confirm`                         | Flujo de invitado: confirmación desde landing           |
+| `npm run test:e2e:staff`       | `@scan`, `@error`, `@critical`     | Flujo de staff: escaneo feliz + duplicados/errores      |
+| `npm run test:e2e:wa`          | `@wa`                              | Flujos previos de organizadores/WhatsApp                |
+| `npm run test:e2e:delivery`    | `@wa`, `@delivery`, `@window`      | Módulo Delivery (WhatsApp/colas/webhook, ventana 24h)   |
+| `npm run test:e2e:director`    | `@director`, `@kpi`, `@cross-browser` | Panel Director (overview, KPIs y regresiones)           |
 
 También puedes llamar directamente a `testsprite run -t <tag>` para combinar varios tags en una sola ejecución.
 
@@ -54,11 +61,14 @@ También puedes llamar directamente a `testsprite run -t <tag>` para combinar va
 
 Las suites nuevas esperan un dataset determinista para evitar flakes:
 
-- **Códigos QR**: al menos uno válido (`MONO-QR-0001`), uno duplicado (`MONO-QR-0001-DUP`), uno inválido (`NOT-A-QR`) y uno asociado a evento expirado (`MONO-QR-ARCHIVED`).
-- **Staff**: token `STAFF-TOKEN-001` con ubicación `main-gate`.
+- **Códigos QR**: al menos uno válido (`SCAN_QR_VALID`), uno duplicado (`SCAN_QR_DUP`), uno inválido (`SCAN_QR_INVALID`) y uno asociado a evento expirado (`SCAN_QR_EXPIRED`).
+- **Staff**: token `STAFF_TOKEN` con ubicación `STAFF_LOCATION`.
 - **Delivery**: evento `demo-event` con plantillas `ticket_confirmation`, `ticket_followup` y `ticket_reminder`. Para escenarios especiales se pueden usar flags como `simulateWindowExpired`, `simulateTransientFailure` o `simulateDuplicate` en el payload.
 - **Director**: métricas base confirmadas=2, show-up=1, deliveries=3 para validar consistencia.
+- **Organizer**: endpoints `/events`, `/events/:id/guests` y `/events/:id/whatsapp/*` deben aceptar payloads de prueba; en entornos sin API pública puedes interceptar las peticiones desde Playwright.
 
+
+Para probar la ventana gratuita de WhatsApp ajusta `WA_SESSION_IN_WINDOW` en `.env.test`. El valor `true` valida respuestas dentro de 24h, mientras que `false` fuerza errores controlados que exigen plantilla/costo. La spec `tests/e2e_delivery/wa-session-window.spec.ts` añade anotaciones con el valor usado en la ejecución.
 Las rutas por defecto (`/delivery/whatsapp/send`, `/delivery/logs`, `/director/overview`, etc.) se pueden sobreescribir mediante variables de entorno `DELIVERY_ROUTE_*` y `DIRECTOR_ROUTE_*` si la infraestructura difiere.
 
 ## Cross-browser en Playwright

@@ -6,7 +6,7 @@ import { getJSON, pollForResource, postJSON } from '../fixtures/http';
 const frontendBase = getFrontendBaseURL();
 
 test.describe('@director overview dashboards', () => {
-  test('@director @kpi should show baseline KPIs in overview', async ({ page, request }) => {
+  test('@director @kpi @cross-browser should show baseline KPIs in overview', async ({ page, request }) => {
     await test.step('open director overview', async () => {
       await page.goto(`${frontendBase}/director/overview`);
       await page.waitForURL(/director\/overview/);
@@ -24,7 +24,7 @@ test.describe('@director overview dashboards', () => {
     });
   });
 
-  test('@director @kpi should refresh metrics after confirmations and scans', async ({ request }) => {
+  test('@director @kpi @cross-browser should refresh metrics after confirmations and scans', async ({ request }) => {
     const confirmCode = seeds.qr.valid;
     const confirmEndpoint = `${directorRoutes.confirm}/${encodeURIComponent(confirmCode)}`;
     const inviteEndpoint = `${directorRoutes.invite}/${encodeURIComponent(confirmCode)}`;

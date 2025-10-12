@@ -28,22 +28,34 @@ module.exports = {
         'tests/e2e_staff/**/*.{spec,test}.{js,ts,jsx,tsx}',
         'tests/e2e_staff/**/*.feature',
       ],
-      tags: ['@scan'],
+      tags: ['@scan', '@error', '@critical'],
+    },
+    scan_validate: {
+      specs: ['tests/e2e_staff/scan-validate.spec.ts'],
+      tags: ['@scan', '@error', '@critical'],
     },
     whatsapp_flows: {
       specs: [
         'tests/e2e_organizer/**/*.{spec,test}.{js,ts,jsx,tsx}',
         'tests/e2e_organizer/**/*.feature',
       ],
-      tags: ['@wa'],
+      tags: ['@wa', '@organizer', '@cross-browser'],
+    },
+    organizer_matrix: {
+      specs: ['tests/e2e_organizer/organizer-workflows.spec.ts'],
+      tags: ['@organizer', '@cross-browser'],
     },
     delivery: {
       specs: ['tests/e2e_delivery/**/*.{spec,test}.{js,ts,jsx,tsx}'],
-      tags: ['@wa', '@delivery'],
+      tags: ['@wa', '@delivery', '@window'],
+    },
+    wa_window: {
+      specs: ['tests/e2e_delivery/wa-session-window.spec.ts'],
+      tags: ['@wa', '@delivery', '@window'],
     },
     director: {
       specs: ['tests/e2e_director/**/*.{spec,test}.{js,ts,jsx,tsx}'],
-      tags: ['@director', '@kpi'],
+      tags: ['@director', '@kpi', '@cross-browser'],
     },
   },
   runner: {
