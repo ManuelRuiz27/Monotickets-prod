@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BACKEND_URL="${BACKEND_URL:-http://backend:3000/health}"
-FRONTEND_URL="${FRONTEND_URL:-http://frontend:3001/health}"
+# Default to published ports on localhost so the check can run outside Docker
+BACKEND_URL="${BACKEND_URL:-http://localhost:8080/health}"
+FRONTEND_URL="${FRONTEND_URL:-http://localhost:3001/health}"
 TIMEOUT_SECONDS=60
 INTERVAL_SECONDS=3
 
