@@ -6,6 +6,8 @@ import { ensureRedis } from './redis/client.js';
 import { query } from './db/index.js';
 import { CircuitBreaker } from './lib/circuit-breaker.js';
 import { runLandingTtlJob } from './jobs/landing-ttl.js';
+import { runKpiRefreshJob } from './jobs/kpi-refresh.js';
+import { invalidateDeliveryStatusCache } from './modules/delivery-status-cache.js';
 import {
   buildTemplateVars,
   buildWhatsappComponentsFromVars,
@@ -55,6 +57,7 @@ async function main() {
   ]);
 
   scheduleLandingJob();
+  scheduleKpiRefreshJob();
   scheduleQueueMetrics();
 }
 
@@ -385,6 +388,7 @@ async function processWaWebhook(data) {
           )`,
         [deliveryStatus, providerRef],
       );
+      await invalidateDeliveryStatusCache({ providerRef, env });
     }
   }
 }
@@ -594,6 +598,7 @@ async function completeDeliveryAttempt({ requestId, attemptId, status, providerR
     [status, providerRef, requestId],
   );
 
+  await invalidateDeliveryStatusCache({ requestId, providerRef, env });
   return { status };
 }
 
@@ -634,6 +639,7 @@ async function failDeliveryAttempt({ requestId, attemptId, errorInfo, willRetry 
       logger({ level: 'error', message: 'delivery_dlq_enqueue_failed', request_id: requestId, error: error.message });
     }
   }
+  await invalidateDeliveryStatusCache({ requestId, env });
 }
 
 function logRetrySchedule({ requestId, attempt, willRetry, backoff, attemptsMade }) {
@@ -856,6 +862,31 @@ function scheduleLandingJob() {
     execute();
     setInterval(execute, 24 * 3600 * 1000).unref();
   }, delay).unref();
+}
+
+function scheduleKpiRefreshJob() {
+  const intervalMinutes = Math.max(5, Number(env.KPI_REFRESH_INTERVAL_MINUTES || 30));
+  const initialDelayMs = Number(env.KPI_REFRESH_INITIAL_DELAY_MS || 15000);
+  const args = new Set(process.argv.slice(2));
+  const dryRun = args.has('--dry-run');
+  const force = args.has('--force');
+
+  const execute = async () => {
+    try {
+      await runKpiRefreshJob({ env, logger, dryRun, force });
+    } catch (error) {
+      logger({ level: 'error', message: 'kpi_refresh_job_failed', error: error.message });
+    }
+  };
+
+  if (force) {
+    execute();
+  }
+
+  setTimeout(() => {
+    execute();
+    setInterval(execute, intervalMinutes * 60 * 1000).unref();
+  }, initialDelayMs).unref();
 }
 
 function scheduleQueueMetrics() {

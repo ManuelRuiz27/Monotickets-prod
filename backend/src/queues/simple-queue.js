@@ -341,6 +341,16 @@ function computeBackoff(backoff = {}, attempt = 1) {
   if (typeof backoff === 'number') return backoff * attempt;
   const type = (backoff.type || 'exponential').toLowerCase();
   const delay = Number(backoff.delay || 1000);
+  if (type === 'sequence') {
+    const delays = Array.isArray(backoff.delays)
+      ? backoff.delays.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value >= 0)
+      : [];
+    if (delays.length === 0) {
+      return delay;
+    }
+    const index = Math.min(delays.length - 1, Math.max(0, attempt - 1));
+    return delays[index];
+  }
   if (type === 'fixed') return delay;
   return delay * 2 ** (attempt - 1);
 }

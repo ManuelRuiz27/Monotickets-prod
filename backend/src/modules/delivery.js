@@ -3,6 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { query } from '../db/index.js';
 import { ensureRedis } from '../redis/client.js';
 import { normalizeDeliveryPayload } from './delivery-templates.js';
+import {
+  cacheDeliveryStatus,
+  getCachedDeliveryStatus,
+  invalidateDeliveryStatusCache,
+} from './delivery-status-cache.js';
 
 const DEFAULT_CHANNEL = 'whatsapp';
 const SUPPORTED_CHANNELS = new Set(['whatsapp', 'email', 'pdf']);
@@ -23,26 +28,38 @@ export function createDeliveryModule(options = {}) {
 
   async function send({ body = {}, requestId }) {
     const eventId = normalizeId(body.eventId || body.event_id);
-    const guestIds = collectGuestIds(body);
+    const organizerId = normalizeId(body.organizerId || env.DEFAULT_ORGANIZER_ID || DEFAULT_ORGANIZER);
     const channel = selectChannel(body.channel);
     const template = typeof body.template === 'string' ? body.template : DEFAULT_TEMPLATE;
-    const organizerId = normalizeId(body.organizerId || env.DEFAULT_ORGANIZER_ID || DEFAULT_ORGANIZER);
     const payload = typeof body.payload === 'object' && body.payload !== null ? body.payload : {};
 
     if (!eventId) {
       return { statusCode: 400, payload: { error: 'event_id_required' } };
     }
 
-    if (guestIds.length === 0) {
-      return { statusCode: 400, payload: { error: 'guest_ids_required' } };
+    const targets = await resolveRecipients({ body, eventId });
+
+    if (targets.length === 0) {
+      return { statusCode: 400, payload: { error: 'recipient_required' } };
     }
 
     const results = [];
-    for (const guestId of guestIds) {
+    for (const target of targets) {
+      if (target.error) {
+        results.push({
+          guestId: target.guestId,
+          phone: target.phone,
+          status: 'failed',
+          error: target.error,
+        });
+        continue;
+      }
+
       try {
         const result = await enqueueOutbound({
           eventId,
-          guestId,
+          guestId: target.guestId,
+          phone: target.phone,
           organizerId,
           channel,
           template,
@@ -50,17 +67,17 @@ export function createDeliveryModule(options = {}) {
           requestId,
           metadata: body.metadata,
         });
-        results.push(result);
+        results.push({ ...result, phone: target.phone });
       } catch (error) {
         log({
           level: 'error',
           message: 'delivery_send_failed',
           error: error.message,
           event_id: eventId,
-          guest_id: guestId,
+          guest_id: target.guestId,
           request_id: requestId,
         });
-        results.push({ guestId, status: 'failed', error: 'enqueue_failed' });
+        results.push({ guestId: target.guestId, phone: target.phone, status: 'failed', error: 'enqueue_failed' });
       }
     }
 
@@ -106,6 +123,7 @@ export function createDeliveryModule(options = {}) {
   async function enqueueOutbound({
     eventId,
     guestId,
+    phone,
     organizerId,
     channel,
     template,
@@ -114,7 +132,7 @@ export function createDeliveryModule(options = {}) {
     metadata,
   }) {
     const redis = await ensureRedis({ name: 'delivery-dedupe', env });
-    const dedupeKey = buildDedupeKey({ eventId, guestId, template });
+    const dedupeKey = buildDedupeKey({ eventId, guestId, phone, template });
     const dedupeValue = requestId || randomUUID();
     const dedupeTtlSeconds = Math.max(60, dedupeWindowMinutes * 60);
 
@@ -162,6 +180,7 @@ export function createDeliveryModule(options = {}) {
       requestId: request.id,
       eventId,
       guestId,
+      phone,
       organizerId,
       channel,
       template,
@@ -171,8 +190,8 @@ export function createDeliveryModule(options = {}) {
     };
 
     const jobOptions = {
-      attempts: Number(env.DELIVERY_MAX_RETRIES || 3),
-      backoff: { type: 'exponential', delay: Number(env.QUEUE_BACKOFF_DELAY_MS || 5000) },
+      attempts: Number(env.DELIVERY_MAX_RETRIES || 5),
+      backoff: buildQueueBackoff(env),
       removeOnComplete: true,
       removeOnFail: false,
       jobId: `delivery:${guestId}:${template}:${Date.now()}`,
@@ -261,28 +280,45 @@ export function createDeliveryModule(options = {}) {
     };
   }
 
-  async function getStatus({ deliveryId }) {
-    if (!deliveryId) {
+  async function getStatus({ deliveryId, providerRef }) {
+    if (!deliveryId && !providerRef) {
       return { statusCode: 400, payload: { error: 'delivery_id_required' } };
     }
 
+    const numericId = deliveryId && /^\d+$/.test(deliveryId) ? Number(deliveryId) : null;
+    const cacheLookup = await getCachedDeliveryStatus({ requestId: numericId, providerRef, env });
+    if (cacheLookup.cached) {
+      return { statusCode: 200, payload: cacheLookup.cached, headers: { 'x-cache': 'hit' } };
+    }
+
     let summary;
-    if (/^\d+$/.test(deliveryId)) {
-      summary = await findDeliverySummaryByRequestId(Number(deliveryId));
+    if (providerRef) {
+      summary = await findDeliverySummaryByProviderRef(providerRef);
+    }
+
+    if (!summary && numericId) {
+      summary = await findDeliverySummaryByRequestId(numericId);
       if (!summary) {
-        summary = await findDeliveryAttemptById(Number(deliveryId));
+        summary = await findDeliveryAttemptById(numericId);
       }
-    } else {
-      summary = await findDeliverySummaryByProviderRef(deliveryId);
     }
 
     if (!summary) {
       return { statusCode: 404, payload: { error: 'not_found' } };
     }
 
+    await cacheDeliveryStatus({
+      requestId: summary.requestId,
+      providerRef: summary.latestAttempt?.providerRef || providerRef,
+      summary,
+      env,
+      ttlSeconds: Number(env.DELIVERY_STATUS_CACHE_TTL_SECONDS || 45),
+    });
+
     return {
       statusCode: 200,
       payload: summary,
+      headers: { 'x-cache': 'miss' },
     };
   }
 
@@ -410,6 +446,29 @@ function collectGuestIds(body) {
   return [];
 }
 
+function collectPhones(body) {
+  const phones = [];
+  if (typeof body.phone === 'string') {
+    phones.push(body.phone);
+  }
+  if (Array.isArray(body.phones)) {
+    for (const value of body.phones) {
+      if (typeof value === 'string') {
+        phones.push(value);
+      }
+    }
+  }
+  if (Array.isArray(body.guests)) {
+    for (const guest of body.guests) {
+      const phone = typeof guest === 'string' ? null : guest?.phone || guest?.waId;
+      if (typeof phone === 'string') {
+        phones.push(phone);
+      }
+    }
+  }
+  return phones;
+}
+
 function normalizeId(value) {
   if (typeof value === 'string' && value.trim()) {
     return value.trim();
@@ -417,8 +476,9 @@ function normalizeId(value) {
   return null;
 }
 
-function buildDedupeKey({ eventId, guestId, template }) {
-  return `${DEDUPE_PREFIX}:${eventId || 'unknown'}:${guestId || 'unknown'}:${template}`;
+function buildDedupeKey({ eventId, guestId, phone, template }) {
+  const identifier = guestId || (phone ? `phone:${normalizePhone(phone)}` : 'unknown');
+  return `${DEDUPE_PREFIX}:${eventId || 'unknown'}:${identifier}:${template}`;
 }
 
 async function createDeliveryRequest({
@@ -467,6 +527,62 @@ async function recordJobQueued(requestId, jobId) {
     `,
     [jobId, requestId],
   );
+
+  await query(
+    `
+      INSERT INTO delivery_logs (request_id, attempt, status, queued_at, created_at)
+      SELECT $1, 0, 'queued', now(), now()
+       WHERE NOT EXISTS (
+         SELECT 1 FROM delivery_logs WHERE request_id = $1 AND attempt = 0
+       )
+    `,
+    [requestId],
+  ).catch(() => {});
+  await invalidateDeliveryStatusCache({ requestId, env });
+}
+
+async function resolveRecipients({ body = {}, eventId }) {
+  const targets = [];
+  const seen = new Set();
+  const guestIds = collectGuestIds(body);
+  for (const guestId of guestIds) {
+    if (!guestId || seen.has(guestId)) {
+      continue;
+    }
+    const lookup = await query(
+      `SELECT id, phone FROM guests WHERE id = $1 AND event_id = $2 LIMIT 1`,
+      [guestId, eventId],
+    );
+    if (lookup.rowCount === 0) {
+      targets.push({ guestId, error: 'guest_not_found' });
+      continue;
+    }
+    seen.add(guestId);
+    const phone = lookup.rows[0].phone ? normalizePhone(lookup.rows[0].phone) : undefined;
+    targets.push({ guestId, phone });
+  }
+
+  const phoneEntries = collectPhones(body);
+  for (const rawPhone of phoneEntries) {
+    const phone = normalizePhone(rawPhone);
+    if (!phone) continue;
+    const lookup = await query(
+      `SELECT id FROM guests WHERE event_id = $1 AND phone = $2 ORDER BY created_at DESC LIMIT 1`,
+      [eventId, phone],
+    );
+    if (lookup.rowCount === 0) {
+      targets.push({ phone, error: 'guest_not_found' });
+      continue;
+    }
+    const guestId = lookup.rows[0].id;
+    if (seen.has(guestId)) {
+      continue;
+    }
+    seen.add(guestId);
+    targets.push({ guestId, phone });
+  }
+
+  return targets;
 }
 
 async function markRequestFailureOnEnqueue(requestId, error) {
@@ -631,6 +747,25 @@ function sanitizeMetadata(metadata) {
   } catch {
     return null;
   }
+}
+
+function normalizePhone(input) {
+  if (typeof input !== 'string') {
+    return '';
+  }
+  return input.replace(/\D+/g, '').replace(/^52(?=1?\d{10}$)/, '52');
+}
+
+function buildQueueBackoff(env = process.env) {
+  const raw = String(env.DELIVERY_BACKOFF_SEQUENCE_MS || '1000,5000,20000,60000');
+  const delays = raw
+    .split(',')
+    .map((value) => Number.parseInt(value.trim(), 10))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (delays.length === 0) {
+    return { type: 'exponential', delay: Number(env.QUEUE_BACKOFF_DELAY_MS || 5000) };
+  }
+  return { type: 'sequence', delays };
 }
 
 function getSessionKey(phone) {

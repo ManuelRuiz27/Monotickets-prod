@@ -37,10 +37,19 @@ Al finalizar, deberías tener:
 - Bitácoras de envíos y escaneos (>80 registros) con datos distribuidos en las dos particiones mensuales de `scan_logs`.
 - Tablas financieras (`ticket_ledger`, `payments`) con >30 movimientos para cálculos de deuda y conciliación.
 - Vistas materializadas refrescadas (`mv_*`) listas para su consumo en Metabase.
+- Índices extra en `delivery_logs` (`event_id, created_at` y `status, created_at`) creados por la migración `20250115001_delivery_director_finalize.sql` para optimizar filtros de estado/fecha.
 
 ## 3. Refrescos programados
 
 Si tu Postgres soporta `pg_cron`, la migración `110_pg_cron_refresh.sql` registra tareas para refrescar las vistas cada 5, 10 o 60 minutos. En entornos donde `pg_cron` no esté disponible, consulta la nota en `docs/bi/kpis.md` para levantar un worker externo que ejecute `REFRESH MATERIALIZED VIEW CONCURRENTLY`.
+
+El worker de backend (`backend/src/jobs/kpi-refresh.js`) ejecuta `runKpiRefreshJob`, el cual:
+
+1. Obtiene un lock en Redis para evitar ejecuciones simultáneas (`KPI_REFRESH_LOCK_KEY`).
+2. Ejecuta `REFRESH MATERIALIZED VIEW CONCURRENTLY` sobre `mv_kpi_tickets_entregados`, `mv_kpi_deuda_abierta`, `mv_kpi_top_organizadores` y las vistas M1–M5.
+3. Llama a los endpoints internos de reportes para precalentar la caché (`DIRECTOR_REPORT_CACHE_TTL_SECONDS`).
+
+El intervalo del job se controla con `KPI_REFRESH_INTERVAL_MINUTES` (por defecto 30 minutos) y puede forzarse con la bandera `--force` al iniciar el worker.
 
 ## 4. Limpieza y resiembra
 
