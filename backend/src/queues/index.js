@@ -27,7 +27,8 @@ export async function createQueues(options = {}) {
     connectionOptions,
     defaultJobOptions: {
       ...defaultJobOptions,
-      attempts: Number(env.DELIVERY_MAX_RETRIES || defaultJobOptions.attempts),
+      attempts: Math.max(Number(env.DELIVERY_MAX_RETRIES || 5), 5),
+      backoff: buildDeliveryBackoff(env),
     },
   });
 
@@ -52,7 +53,11 @@ export async function createQueues(options = {}) {
   const waInbound = await createSimpleQueue(inboundQueueName, {
     logger,
     connectionOptions,
-    defaultJobOptions,
+    defaultJobOptions: {
+      ...defaultJobOptions,
+      attempts: Math.max(Number(env.DELIVERY_MAX_RETRIES || 5), 5),
+      backoff: buildDeliveryBackoff(env),
+    },
   });
 
   const payments = await createSimpleQueue(env.PAYMENTS_QUEUE_NAME || 'paymentsQueue', {
@@ -85,4 +90,16 @@ export async function createQueues(options = {}) {
     paymentsQueue: payments.queue,
     paymentsEvents: payments.events,
   };
+}
+
+function buildDeliveryBackoff(env = process.env) {
+  const raw = String(env.DELIVERY_BACKOFF_SEQUENCE_MS || '1000,5000,20000,60000');
+  const delays = raw
+    .split(',')
+    .map((value) => Number.parseInt(value.trim(), 10))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (delays.length === 0) {
+    return { type: 'exponential', delay: Number(env.QUEUE_BACKOFF_DELAY_MS || DEFAULT_BACKOFF_DELAY) };
+  }
+  return { type: 'sequence', delays };
 }

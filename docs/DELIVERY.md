@@ -6,7 +6,7 @@ El servicio Delivery centraliza los envíos de invitaciones y recordatorios vía
 
 | Método | Ruta | Descripción |
 | --- | --- | --- |
-| `POST` | `/deliver/send` | Crea envíos individuales o por lote. El cuerpo debe incluir `guestId` o `guestIds[]`, `eventId`, `channel` (`whatsapp`/`email`) y `template`. |
+| `POST` | `/deliver/send` | Crea envíos individuales o por lote. El cuerpo debe incluir `eventId`, `channel` (`whatsapp`/`email`) y `template`, además de al menos uno de `guestId`, `guestIds[]` o `phone`. El servicio buscará el invitado por `eventId+phone` si no se envía `guestId`. |
 | `POST` | `/deliver/webhook` | Recibe webhooks de 360dialog. Responde `200 OK` inmediatamente y encola el payload para procesamiento asíncrono. |
 | `GET` | `/deliver/:id/status` | Consulta el estado del envío usando el `id` de `delivery_logs` o el `provider_ref`. |
 
@@ -14,15 +14,16 @@ Los endpoints legados (`POST /events/:eventId/guests/:guestId/send`, `POST /wa/w
 
 ## Colas y workers
 
-- `wa_outbound` (configurable con `DELIVERY_QUEUE_NAME` o `WA_OUTBOUND_QUEUE_NAME`): recibe jobs `send` con los datos del invitado y del template. Implementa reintentos exponenciales y DLQ.
-- `wa_inbound`: procesa los webhooks de 360dialog y actualiza sesiones de 24 h, así como estados de invitados confirmados.
+- `wa_outbound` (configurable con `DELIVERY_QUEUE_NAME` o `WA_OUTBOUND_QUEUE_NAME`): recibe jobs `send` con los datos del invitado y del template. Implementa la secuencia de reintentos `1s → 5s → 20s → 60s` con un máximo de 5 intentos antes de pasar a la DLQ.
+- `wa_inbound`: procesa los webhooks de 360dialog, deduplica por `message.id` y actualiza sesiones de 24 h. Utiliza la misma secuencia de reintentos para asegurar idempotencia en los inbound events.
 
-Ambas colas usan backoff exponencial con máximos definidos en las variables de entorno `DELIVERY_MAX_RETRIES` y `QUEUE_BACKOFF_DELAY_MS`. Los jobs entran a DLQ cuando exceden los reintentos; se registran en logs para trazabilidad.
+Ambas colas registran cada transición en `delivery_logs` (`queued → processing → sent|delivered|failed`). Los fallos definitivos se envían a `delivery_failed` para análisis manual.
 
-## Idempotencia y deduplicación
+## Idempotencia, dedupe y caché
 
-- **Outbound**: antes de encolar se calcula una clave `delivery:dedupe:{guestId}:{template}`. Si existe dentro de la ventana configurada (`DELIVERY_DEDUPE_WINDOW_MIN`, minutos), el job se marca como `duplicate` y no se vuelve a encolar. Esto evita envíos repetidos en menos de 24 h.
-- **Inbound**: cada mensaje entrante de WhatsApp verifica `provider_ref` y `message.id`. Si ya fueron procesados se ignoran, evitando cambios de estado duplicados.
+- **Outbound**: antes de encolar se calcula una clave `delivery:dedupe:{eventId}:{guest|phone}:{template}`. Si existe dentro de la ventana configurada (`DELIVERY_DEDUPE_WINDOW_MIN`, minutos), el job se marca como `duplicate`. Esto evita reenvíos dentro de las 24 h.
+- **Inbound**: cada mensaje entrante de WhatsApp verifica `provider_ref` y `message.id`. Los duplicados se descartan y se conserva la primera transición registrada.
+- **Estados**: las respuestas de `GET /deliver/:id/status` se guardan en Redis con TTL de 30–60 s (`DELIVERY_STATUS_CACHE_TTL_SECONDS`). Cada intento exitoso/erróneo invalida la caché para mantener los dashboards sincronizados.
 
 ## delivery_logs
 
@@ -43,9 +44,11 @@ Cuando se recibe un mensaje válido dentro de la ventana de 24 h (`WA_SESSION_TT
 | `WA_API_BASE` | Base URL del API de 360dialog. Se usa cuando hay credenciales reales. |
 | `WA_API_TOKEN` | Token Bearer para 360dialog. Si falta, los envíos se simulan (`simulated=true`). |
 | `RESEND_API_KEY` | API key de Resend para correos. |
-| `DELIVERY_MAX_RETRIES` | Máximo de reintentos por job en `wa_outbound`. |
+| `DELIVERY_MAX_RETRIES` | Máximo de reintentos por job en `wa_outbound`/`wa_inbound`. |
+| `DELIVERY_BACKOFF_SEQUENCE_MS` | Secuencia de backoff separada por comas (por defecto `1000,5000,20000,60000`). |
+| `DELIVERY_STATUS_CACHE_TTL_SECONDS` | TTL en segundos para el caché de `GET /deliver/:id/status`. |
 | `DELIVERY_DEDUPE_WINDOW_MIN` | Ventana (minutos) para evitar envíos duplicados. Predeterminado 24 h. |
-| `REDIS_URL` | Conexión a Redis para colas, dedupe y locks. |
+| `REDIS_URL` | Conexión a Redis para colas, dedupe, locks y cachés. |
 
 ## Pruebas rápidas
 
@@ -53,7 +56,7 @@ Cuando se recibe un mensaje válido dentro de la ventana de 24 h (`WA_SESSION_TT
 # Envío outbound
 curl -sS -X POST http://localhost:8080/deliver/send \
   -H "Content-Type: application/json" \
-  -d '{"eventId":"ev_demo","guestId":"guest_demo","channel":"whatsapp","template":"invite"}'
+  -d '{"eventId":"ev_demo","phone":"+5215550011223","channel":"whatsapp","template":"invite"}'
 
 # Webhook inbound (se encola y responde 200)
 curl -sS -X POST http://localhost:8080/deliver/webhook \

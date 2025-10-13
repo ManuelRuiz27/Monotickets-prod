@@ -37,6 +37,10 @@ const RATE_LIMIT_DIRECTOR_ASSIGN = Number(process.env.RATE_LIMIT_DIRECTOR_ASSIGN
 const RATE_LIMIT_DIRECTOR_PAYMENTS = Number(process.env.RATE_LIMIT_DIRECTOR_PAYMENTS || 20);
 const RATE_LIMIT_DIRECTOR_OVERVIEW = Number(process.env.RATE_LIMIT_DIRECTOR_OVERVIEW || 30);
 const RATE_LIMIT_DIRECTOR_LEDGER = Number(process.env.RATE_LIMIT_DIRECTOR_LEDGER || 30);
+const RATE_LIMIT_DIRECTOR_REPORT_OVERVIEW = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_OVERVIEW || 30);
+const RATE_LIMIT_DIRECTOR_REPORT_TOP = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_TOP || 30);
+const RATE_LIMIT_DIRECTOR_REPORT_DEBT = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_DEBT || 30);
+const RATE_LIMIT_DIRECTOR_REPORT_USAGE = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_USAGE || 30);
 
 function observeHttpDuration({ method, path, status, durationMs }) {
   const key = `${method.toUpperCase()}::${status}::${path}`;
@@ -224,7 +228,13 @@ export function createServer(options = {}) {
           return;
         }
         const deliveryId = url.pathname.split('/')[2];
-        const { statusCode, payload } = await deliveryModule.getStatus({ deliveryId });
+        const providerRef = url.searchParams.get('provider_ref') || url.searchParams.get('providerRef') || undefined;
+        const { statusCode, payload, headers } = await deliveryModule.getStatus({ deliveryId, providerRef });
+        if (headers) {
+          Object.entries(headers).forEach(([key, value]) => {
+            res.setHeader(key, value);
+          });
+        }
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
@@ -326,6 +336,51 @@ export function createServer(options = {}) {
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
+      if (method === 'GET' && url.pathname === '/director/reports/overview') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DIRECTOR_REPORTS_OVERVIEW,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+
+        const rateKey = [
+          'ratelimit',
+          'director',
+          'reports',
+          'overview',
+          auth.user?.id || 'anonymous',
+          clientFingerprint,
+        ].join(':');
+        const reportLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_DIRECTOR_REPORT_OVERVIEW,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!reportLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
+        const filters = Object.fromEntries(url.searchParams.entries());
+        const { statusCode, payload, headers } = await directorModule.getOverviewReport({ filters });
+        if (headers) {
+          Object.entries(headers).forEach(([key, value]) => {
+            res.setHeader(key, value);
+          });
+        }
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
       if (method === 'POST' && url.pathname === '/director/assign') {
         if (!requireAction({
           auth,
@@ -361,6 +416,141 @@ export function createServer(options = {}) {
 
         const body = await readJsonBody(req, logger);
         const { statusCode, payload } = await directorModule.assignTickets({ body, requestId });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'GET' && url.pathname === '/director/reports/top-organizers') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DIRECTOR_REPORTS_TOP,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+
+        const rateKey = [
+          'ratelimit',
+          'director',
+          'reports',
+          'top',
+          auth.user?.id || 'anonymous',
+          clientFingerprint,
+        ].join(':');
+        const topLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_DIRECTOR_REPORT_TOP,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!topLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
+        const filters = Object.fromEntries(url.searchParams.entries());
+        const { statusCode, payload, headers } = await directorModule.getTopOrganizersReport({ filters });
+        if (headers) {
+          Object.entries(headers).forEach(([key, value]) => {
+            res.setHeader(key, value);
+          });
+        }
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'GET' && url.pathname === '/director/reports/debt-aging') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DIRECTOR_REPORTS_DEBT,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+
+        const rateKey = [
+          'ratelimit',
+          'director',
+          'reports',
+          'debt',
+          auth.user?.id || 'anonymous',
+          clientFingerprint,
+        ].join(':');
+        const debtLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_DIRECTOR_REPORT_DEBT,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!debtLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
+        const filters = Object.fromEntries(url.searchParams.entries());
+        const { statusCode, payload, headers } = await directorModule.getDebtAgingReport({ filters });
+        if (headers) {
+          Object.entries(headers).forEach(([key, value]) => {
+            res.setHeader(key, value);
+          });
+        }
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'GET' && url.pathname === '/director/reports/tickets-usage') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DIRECTOR_REPORTS_USAGE,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+
+        const rateKey = [
+          'ratelimit',
+          'director',
+          'reports',
+          'usage',
+          auth.user?.id || 'anonymous',
+          clientFingerprint,
+        ].join(':');
+        const usageLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_DIRECTOR_REPORT_USAGE,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!usageLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
+        const filters = Object.fromEntries(url.searchParams.entries());
+        const { statusCode, payload, headers } = await directorModule.getTicketsUsageReport({ filters });
+        if (headers) {
+          Object.entries(headers).forEach(([key, value]) => {
+            res.setHeader(key, value);
+          });
+        }
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
