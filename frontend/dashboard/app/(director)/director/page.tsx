@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import { getDirectorOverview, DirectorOverview } from '../../../lib/api/director';
-import { colors, spacing, typography } from '../../../shared/theme';
+import { getDirectorOverview, DirectorOverview } from '@/lib/api/director';
+import { colors, spacing, typography } from '@shared/theme';
 import { KpiSummary } from '../_components/KpiSummary';
 
 export default function DirectorOverviewPage() {

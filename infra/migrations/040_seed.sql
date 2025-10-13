@@ -4,19 +4,99 @@ WITH constants AS (
         date_trunc('month', now()) - interval '1 month' AS previous_month_start
 ),
 organizer_seed AS (
-    INSERT INTO organizers (name, contact, pricing)
+    INSERT INTO organizers (name, contact, pricing, status, billing, tags, account_manager)
     VALUES
         (
             'Experiencias Aurora',
             jsonb_build_object('email', 'contacto@aurora.mx', 'phone', '+52-55-1000-0001'),
-            jsonb_build_object('standard_ticket_price', 5.00, 'premium_ticket_price', 9.50)
+            jsonb_build_object('standard_ticket_price', 5.00, 'premium_ticket_price', 9.50),
+            'active',
+            jsonb_build_object('tax_id', 'EAU901220MM0', 'invoice_email', 'billing@aurora.mx'),
+            ARRAY['premium', 'hospitality']::text[],
+            'mx-mariana.rios'
         ),
         (
             'Momentum Eventos',
             jsonb_build_object('email', 'hola@momentum.mx', 'phone', '+52-33-9000-0002'),
-            jsonb_build_object('standard_ticket_price', 3.50, 'premium_ticket_price', 7.50)
+            jsonb_build_object('standard_ticket_price', 3.50, 'premium_ticket_price', 7.50),
+            'active',
+            jsonb_build_object('tax_id', 'MON830102AA1', 'invoice_email', 'finance@momentum.mx'),
+            ARRAY['corporate', 'hybrid']::text[],
+            'mx-andres.lopez'
+        ),
+        (
+            'Cumbre Boreal',
+            jsonb_build_object('email', 'hello@cumbreboreal.mx', 'phone', '+52-81-4020-1003'),
+            jsonb_build_object('standard_ticket_price', 4.20, 'premium_ticket_price', 8.10),
+            'active',
+            jsonb_build_object('tax_id', 'CBO770101BB2', 'invoice_email', 'cobranza@cumbreboreal.mx'),
+            ARRAY['outdoor', 'hybrid']::text[],
+            'mx-ana.luna'
+        ),
+        (
+            'Luminaria Producciones',
+            jsonb_build_object('email', 'info@luminaria.mx', 'phone', '+52-55-4020-1004'),
+            jsonb_build_object('standard_ticket_price', 6.10, 'premium_ticket_price', 11.20),
+            'active',
+            jsonb_build_object('tax_id', 'LUP850202CC3', 'invoice_email', 'billing@luminaria.mx'),
+            ARRAY['premium', 'concerts']::text[],
+            'mx-marco.solis'
+        ),
+        (
+            'Atlántico Booking',
+            jsonb_build_object('email', 'ventas@atlantico.mx', 'phone', '+52-229-330-1005'),
+            jsonb_build_object('standard_ticket_price', 2.80, 'premium_ticket_price', 5.40),
+            'suspended',
+            jsonb_build_object('tax_id', 'ATB930303DD4', 'invoice_email', 'pagos@atlantico.mx'),
+            ARRAY['corporate']::text[],
+            'mx-laura.vera'
+        ),
+        (
+            'Ruta Norte Eventos',
+            jsonb_build_object('email', 'contacto@rutanorte.mx', 'phone', '+52-81-7777-1006'),
+            jsonb_build_object('standard_ticket_price', 3.90, 'premium_ticket_price', 7.80),
+            'active',
+            jsonb_build_object('tax_id', 'RNE910404EE5', 'invoice_email', 'cobros@rutanorte.mx'),
+            ARRAY['regional', 'standard']::text[],
+            'mx-isaac.marin'
+        ),
+        (
+            'Selva & Co',
+            jsonb_build_object('email', 'hola@selva.mx', 'phone', '+52-55-6600-1007'),
+            jsonb_build_object('standard_ticket_price', 2.60, 'premium_ticket_price', 5.80),
+            'active',
+            jsonb_build_object('tax_id', 'SEL950505FF6', 'invoice_email', 'finanzas@selva.mx'),
+            ARRAY['eco', 'hybrid']::text[],
+            'mx-valeria.rojas'
+        ),
+        (
+            'Distrito Sonoro',
+            jsonb_build_object('email', 'hello@distritosonoro.mx', 'phone', '+52-33-4400-1008'),
+            jsonb_build_object('standard_ticket_price', 4.80, 'premium_ticket_price', 9.20),
+            'active',
+            jsonb_build_object('tax_id', 'DIS890606GG7', 'invoice_email', 'billing@distritosonoro.mx'),
+            ARRAY['concerts', 'urban']::text[],
+            'mx-saul.mendez'
+        ),
+        (
+            'Foro Prisma',
+            jsonb_build_object('email', 'info@foroprisma.mx', 'phone', '+52-55-7800-1009'),
+            jsonb_build_object('standard_ticket_price', 3.10, 'premium_ticket_price', 6.30),
+            'archived',
+            jsonb_build_object('tax_id', 'FPR870707HH8', 'invoice_email', 'cierre@foroprisma.mx'),
+            ARRAY['venue']::text[],
+            'mx-alejandra.tez'
+        ),
+        (
+            'Andes Summit',
+            jsonb_build_object('email', 'coord@andessummit.pe', 'phone', '+51-1-220-1010'),
+            jsonb_build_object('standard_ticket_price', 5.50, 'premium_ticket_price', 10.40),
+            'active',
+            jsonb_build_object('tax_id', 'AND990808JJ9', 'invoice_email', 'billing@andessummit.pe'),
+            ARRAY['conference', 'international']::text[],
+            'pe-nicolas.quispe'
         )
-    RETURNING id, name
+    RETURNING id, name, pricing
 ),
 event_seed AS (
     INSERT INTO events (organizer_id, name, type, status, starts_at, ends_at)
@@ -37,8 +117,13 @@ event_seed AS (
             date_trunc('hour', now() + interval '15 days') + interval '10 hours',
             date_trunc('hour', now() + interval '15 days') + interval '18 hours'
         )
-    RETURNING id, organizer_id, type, name,
-        ROW_NUMBER() OVER (ORDER BY starts_at) AS event_idx
+    RETURNING id, organizer_id, type, name, starts_at
+),
+event_enriched AS (
+    SELECT
+        es.*,
+        ROW_NUMBER() OVER (ORDER BY es.starts_at) AS event_idx
+    FROM event_seed es
 ),
 guest_blueprint AS (
     SELECT
@@ -63,7 +148,7 @@ guest_blueprint AS (
         format('%s Invitado %s', e.name, gs) AS guest_name,
         '+52' || lpad((55 + e.event_idx)::text, 2, '0') || lpad(gs::text, 2, '0') || lpad((gs * 7)::text, 4, '0') AS phone,
         lower(replace(e.name, ' ', '.')) || '.guest' || gs || '@demo.monotickets.mx' AS email
-    FROM event_seed e
+    FROM event_enriched e
     CROSS JOIN generate_series(1, 16) AS gs
 ),
 guest_insert AS (
@@ -130,7 +215,7 @@ valid_scans AS (
             'location', CASE WHEN sg.rn % 2 = 0 THEN 'Main Gate' ELSE 'VIP Gate' END
         )
     FROM scanned_guests sg
-    JOIN event_seed e ON e.id = sg.event_id
+    JOIN event_enriched e ON e.id = sg.event_id
     CROSS JOIN constants c
     CROSS JOIN generate_series(1, 2) AS attempt
     RETURNING 1
@@ -152,7 +237,7 @@ duplicate_scans AS (
             'location', CASE WHEN sg.rn % 3 = 0 THEN 'Secondary Gate' ELSE 'Main Gate' END
         )
     FROM scanned_guests sg
-    JOIN event_seed e ON e.id = sg.event_id
+    JOIN event_enriched e ON e.id = sg.event_id
     CROSS JOIN constants c
     JOIN LATERAL generate_series(1, 3) AS dup(iteration) ON TRUE
     RETURNING 1
@@ -179,7 +264,7 @@ invalid_scans AS (
 confirmed_guests AS (
     SELECT g.*, e.event_idx
     FROM guest_enriched g
-    JOIN event_seed e ON e.id = g.event_id
+    JOIN event_enriched e ON e.id = g.event_id
     WHERE g.status IN ('confirmed', 'scanned')
 ),
 delivery_plan AS (
@@ -206,7 +291,7 @@ delivery_plan AS (
             ELSE NULL
         END AS error
     FROM confirmed_guests g
-    JOIN event_seed e ON e.id = g.event_id
+    JOIN event_enriched e ON e.id = g.event_id
     JOIN LATERAL generate_series(1, 4) AS attempt(attempt) ON TRUE
 ),
 delivery_insert AS (
@@ -225,81 +310,84 @@ delivery_insert AS (
     FROM delivery_plan
     RETURNING *
 ),
+ledger_blueprint AS (
+    SELECT
+        o.id AS organizer_id,
+        o.name AS organizer_name,
+        CASE
+            WHEN o.name IN ('Experiencias Aurora', 'Momentum Eventos') THEN
+                (SELECT id FROM event_enriched e WHERE e.organizer_id = o.id LIMIT 1)
+            ELSE NULL
+        END AS event_id,
+        CASE WHEN series.seq % 2 = 0 THEN 'prepago' ELSE 'prestamo' END AS kind,
+        ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY series.seq) AS rn,
+        series.seq,
+        (o.pricing->>'standard_ticket_price')::numeric AS standard_price
+    FROM organizer_seed o
+    JOIN LATERAL generate_series(
+        1,
+        CASE WHEN o.name IN ('Experiencias Aurora', 'Momentum Eventos') THEN 4 ELSE 3 END
+    ) AS series(seq) ON TRUE
+),
 ledger_insert AS (
-    INSERT INTO ticket_ledger (organizer_id, event_id, kind, tickets, equiv_json, unit_price)
-    SELECT organizer_id, event_id, kind, tickets, equiv_json, unit_price
-    FROM (
-        SELECT
-            (SELECT id FROM organizer_seed WHERE name = 'Experiencias Aurora') AS organizer_id,
-            (SELECT id FROM event_seed WHERE name = 'Gala Innovación 2024') AS event_id,
-            'prepago'::text AS kind,
-            300 AS tickets,
-            jsonb_build_object(
-                'standard_equiv', 300,
-                'premium_equiv', 150,
-                'ratio', jsonb_build_object('standard', 1, 'premium', 2)
-            ) AS equiv_json,
-            5.00::numeric AS unit_price
-        UNION ALL
-        SELECT
-            (SELECT id FROM organizer_seed WHERE name = 'Experiencias Aurora'),
-            (SELECT id FROM event_seed WHERE name = 'Gala Innovación 2024'),
-            'prestamo',
-            120,
-            jsonb_build_object(
-                'standard_equiv', 120,
-                'premium_equiv', 60,
-                'ratio', jsonb_build_object('standard', 1, 'premium', 2)
-            ),
-            5.00::numeric
-        UNION ALL
-        SELECT
-            (SELECT id FROM organizer_seed WHERE name = 'Momentum Eventos'),
-            (SELECT id FROM event_seed WHERE name = 'Summit Premium Riviera'),
-            'prepago',
-            220,
-            jsonb_build_object(
-                'standard_equiv', 220,
-                'premium_equiv', 110,
-                'ratio', jsonb_build_object('standard', 1, 'premium', 2)
-            ),
-            3.50::numeric
-        UNION ALL
-        SELECT
-            (SELECT id FROM organizer_seed WHERE name = 'Momentum Eventos'),
-            (SELECT id FROM event_seed WHERE name = 'Summit Premium Riviera'),
-            'prestamo',
-            140,
-            jsonb_build_object(
-                'standard_equiv', 140,
-                'premium_equiv', 70,
-                'ratio', jsonb_build_object('standard', 1, 'premium', 2)
-            ),
-            3.50::numeric
-    ) ledger_rows
+    INSERT INTO ticket_ledger (organizer_id, event_id, kind, tickets, equiv_json, unit_price, source, reference, metadata)
+    SELECT
+        organizer_id,
+        event_id,
+        kind,
+        90 + rn * 10 AS tickets,
+        jsonb_build_object(
+            'standard_equiv', 90 + rn * 10,
+            'premium_equiv', CEIL((90 + rn * 10) * 0.5),
+            'ratio', jsonb_build_object('standard', 1, 'premium', 2)
+        ) AS equiv_json,
+        standard_price AS unit_price,
+        CASE
+            WHEN seq % 3 = 0 THEN 'adjustment'
+            WHEN seq % 2 = 0 THEN 'import'
+            ELSE 'manual'
+        END AS source,
+        substr(organizer_id::text, 1, 6) || '-' || to_char(seq, 'FM00') AS reference,
+        jsonb_build_object(
+            'batch', rn,
+            'season', CASE WHEN seq % 2 = 0 THEN 'spring' ELSE 'summer' END,
+            'organizer', organizer_name
+        ) AS metadata
+    FROM ledger_blueprint
     RETURNING *
 ),
+payments_blueprint AS (
+    SELECT
+        o.id AS organizer_id,
+        o.name AS organizer_name,
+        ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY series.seq) AS rn,
+        series.seq
+    FROM organizer_seed o
+    JOIN LATERAL generate_series(
+        1,
+        CASE WHEN o.name IN ('Experiencias Aurora', 'Momentum Eventos') THEN 4 ELSE 2 END
+    ) AS series(seq) ON TRUE
+),
 payments_insert AS (
-    INSERT INTO payments (organizer_id, amount, method, ref)
-    VALUES
-        (
-            (SELECT id FROM organizer_seed WHERE name = 'Experiencias Aurora'),
-            750.00,
-            'transferencia',
-            'AUR-TR-001'
-        ),
-        (
-            (SELECT id FROM organizer_seed WHERE name = 'Experiencias Aurora'),
-            320.00,
-            'transferencia',
-            'AUR-TR-002'
-        ),
-        (
-            (SELECT id FROM organizer_seed WHERE name = 'Momentum Eventos'),
-            420.00,
-            'spei',
-            'MOM-SPEI-9001'
-        )
+    INSERT INTO payments (organizer_id, amount, method, ref, status, processed_at, metadata)
+    SELECT
+        organizer_id,
+        ROUND((150 + rn * 25 + seq * 5)::numeric, 2) AS amount,
+        CASE WHEN seq % 2 = 0 THEN 'spei' ELSE 'transferencia' END AS method,
+        upper(left(regexp_replace(organizer_name, '[^A-Za-z]', '', 'g'), 3)) || '-' ||
+            to_char(700 + rn * 10 + seq, 'FM0000') AS ref,
+        CASE
+            WHEN seq % 4 = 0 THEN 'failed'
+            WHEN seq % 3 = 0 THEN 'pending'
+            ELSE 'settled'
+        END AS status,
+        now() - (rn * interval '4 days') - (seq * interval '6 hours') AS processed_at,
+        jsonb_build_object(
+            'batch', rn,
+            'channel', CASE WHEN seq % 2 = 0 THEN 'bank' ELSE 'cash' END,
+            'imported', seq % 3 = 0
+        ) AS metadata
+    FROM payments_blueprint
     RETURNING *
 )
 SELECT

@@ -9,11 +9,11 @@ import {
   invalidateCaches,
   CreateEventPayload,
   Guest,
-} from '../../../../lib/api/organizer';
+} from '@/lib/api/organizer';
 import { StepCover, CoverData } from './_components/StepCover';
 import { StepGuests, GuestDraft } from './_components/StepGuests';
 import { StepWhatsApp } from './_components/StepWhatsApp';
-import { colors, spacing, typography, cardStyles, buttonStyles } from '../../../../shared/theme';
+import { colors, spacing, typography, cardStyles, buttonStyles } from '@shared/theme';
 
 const steps = ['Portada y landing', 'Invitados', 'WhatsApp'] as const;
 

@@ -1,46 +1,25 @@
 import { randomUUID } from 'node:crypto';
 
-function toPlainString(payload) {
-  const { level = 'info', message = '', ts, service, ...rest } = payload;
-  const ordered = Object.entries(rest)
-    .filter(([, value]) => value !== undefined && value !== null)
-    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-    .join(' ');
-  const timestamp = ts || new Date().toISOString();
-  return `[${timestamp}] [${level.toUpperCase()}] [${service ?? 'app'}] ${message}${
-    ordered ? ` ${ordered}` : ''
-  }`;
-}
-
 export function createLogger(options = {}) {
-  const { env = process.env, service = 'app' } = options;
-  const format = (env.LOG_FORMAT || '').toLowerCase();
+  const { service = 'app' } = options;
 
   return (input = {}) => {
-    const ts = input.ts || new Date().toISOString();
-    const requestId = input.request_id || input.req_id || input.requestId;
-    const payload = {
-      ts,
-      service,
-      ...input,
-      request_id: requestId,
-      req_id: requestId,
-    };
+    const timestamp = input.ts || new Date().toISOString();
+    const requestId = input.request_id || input.req_id || input.requestId || randomUUID();
 
-    if (!payload.request_id) {
-      const generated = randomUUID();
-      payload.request_id = generated;
-      payload.req_id = generated;
-    }
+    const sanitized = Object.fromEntries(
+      Object.entries({
+        timestamp,
+        ts: timestamp,
+        service,
+        level: input.level || 'info',
+        ...input,
+        request_id: requestId,
+        req_id: requestId,
+        correlation_id: requestId,
+      }).filter(([, value]) => value !== undefined && value !== null),
+    );
 
-    if (format === 'json') {
-      const sanitized = Object.fromEntries(
-        Object.entries(payload).filter(([, value]) => value !== undefined),
-      );
-      console.log(JSON.stringify(sanitized));
-      return;
-    }
-
-    console.log(toPlainString(payload));
+    console.log(JSON.stringify(sanitized));
   };
 }

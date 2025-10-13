@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light;
+  --color-navy: #0f172a;
+  --color-sky: #2563eb;
+  --color-emerald: #10b981;
+  --color-amber: #f59e0b;
+  --color-surface: #f8fafc;
+  --font-title: 'Poppins', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--color-surface);
+  font-family: var(--font-body);
+  color: var(--color-navy);
+}
+
+a {
+  color: inherit;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(circle at 20% -5%, rgba(37, 99, 235, 0.16), transparent 55%),
+    radial-gradient(circle at 80% 0%, rgba(16, 185, 129, 0.12), transparent 40%);
+}

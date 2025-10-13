@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import { getPayments, createPayment, PaymentRecord } from '../../../lib/api/director';
-import { colors, spacing, typography, inputStyles } from '../../../shared/theme';
+import { getPayments, createPayment, PaymentRecord } from '@/lib/api/director';
+import { colors, spacing, typography, inputStyles } from '@shared/theme';
 
 const inputStyle = parseStyles(inputStyles);
 

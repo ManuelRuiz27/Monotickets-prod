@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { colors, typography, spacing, inputStyles, buttonStyles } from '../../../../../shared/theme';
+import { colors, typography, spacing, inputStyles, buttonStyles } from '@shared/theme';
 
 export interface CoverData {
   name: string;

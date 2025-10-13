@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import { KpiOverview } from '../../../lib/api/director';
-import { colors, typography, spacing, cardStyles } from '../../../shared/theme';
+import { KpiOverview } from '@/lib/api/director';
+import { colors, typography, spacing, cardStyles } from '@shared/theme';
 
 const cardStyle = parseStyles(cardStyles);
 

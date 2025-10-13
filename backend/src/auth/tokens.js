@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-import { getJwtExpirations } from '../config/jwt.js';
+import { getJwtClaims, getJwtExpirations } from '../config/jwt.js';
 
 const JWT_ALGORITHM = 'HS256';
 
@@ -30,6 +30,7 @@ function signToken(payload, type, options = {}) {
   const { env = process.env } = options;
   const secret = getJwtSecret(env);
   const expirations = getJwtExpirations(env);
+  const claims = getJwtClaims(env);
   const expiresInSeconds = expirations[type];
 
   if (!expiresInSeconds) {
@@ -44,6 +45,9 @@ function signToken(payload, type, options = {}) {
   const issuedAt = Math.floor(Date.now() / 1000);
   const tokenPayload = {
     ...payload,
+    iss: claims.issuer,
+    aud: claims.audience,
+    tokenType: type,
     iat: issuedAt,
     exp: issuedAt + expiresInSeconds,
   };
@@ -76,6 +80,9 @@ export function verifyJwt(token, secret) {
   }
 
   const expectedSignature = createSignature(`${encodedHeader}.${encodedPayload}`, secret);
+  if (expectedSignature.length !== signature.length) {
+    return false;
+  }
 
   return timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature));
 }

@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { typography, colors, spacing, inputStyles, buttonStyles } from '../../../../../shared/theme';
+import { typography, colors, spacing, inputStyles, buttonStyles } from '@shared/theme';
 
 const inputStyle = parseStyles(inputStyles);
 const primaryButton = parseStyles(buttonStyles.primary);

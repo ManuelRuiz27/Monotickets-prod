@@ -1,7 +1,7 @@
 import type React from 'react';
 import Link from 'next/link';
-import type { EventSummary, GuestSummary } from '../../../../lib/api/guest';
-import { withThemeClassName } from '../../../../lib/theme/overrides';
+import type { EventSummary, GuestSummary } from '@/lib/api/guest';
+import { withThemeClassName } from '@/lib/theme/overrides';
 
 interface HeroCoverProps {
   event: EventSummary;

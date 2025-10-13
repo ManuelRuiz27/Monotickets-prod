@@ -12,9 +12,9 @@ import {
   Guest,
   EventDetail,
   ConfirmationState,
-} from '../../../../lib/api/organizer';
-import { colors, spacing, typography, cardStyles, buttonStyles, inputStyles } from '../../../../shared/theme';
-import { Tabs, TabTrigger, TabPanel } from '../../../../lib/ui/tabs';
+} from '@/lib/api/organizer';
+import { colors, spacing, typography, cardStyles, buttonStyles, inputStyles } from '@shared/theme';
+import { Tabs, TabTrigger, TabPanel } from '@/lib/ui/tabs';
 import { StageMetrics } from './_components/StageMetrics';
 
 const cardStyle = parseStyles(cardStyles);

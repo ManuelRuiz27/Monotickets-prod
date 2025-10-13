@@ -9,6 +9,7 @@ const DEFAULT_TEMPLATE = 'event_invitation';
 const DEFAULT_ORGANIZER = '00000000-0000-0000-0000-000000000000';
 const DEFAULT_DEDUPE_WINDOW_MINUTES = 1440;
 const DEDUPE_PREFIX = 'delivery:dedupe';
+const SIGNATURE_HEADER_KEYS = ['x-wa-signature', 'x-360dialog-signature', 'x-hub-signature'];
 
 export function createDeliveryModule(options = {}) {
   const { env = process.env, queuesPromise, logger } = options;
@@ -94,7 +95,8 @@ export function createDeliveryModule(options = {}) {
       payload: {
         status: result.status,
         jobId: result.jobId,
-        deliveryLogId: result.deliveryLogId,
+        requestId: result.requestId,
+        correlationId: result.correlationId,
         duplicateOf: result.duplicateOf,
       },
     };
@@ -117,7 +119,12 @@ export function createDeliveryModule(options = {}) {
 
     const dedupeResult = await redis.set(dedupeKey, dedupeValue, 'NX', 'EX', dedupeTtlSeconds);
     if (dedupeResult !== 'OK') {
-      const existing = await findRecentDeliveryLog({ eventId, guestId, template, windowMinutes: dedupeWindowMinutes });
+      const existing = await findRecentDeliveryRequest({
+        eventId,
+        guestId,
+        template,
+        windowMinutes: dedupeWindowMinutes,
+      });
       log({
         level: 'info',
         message: 'delivery_deduped',
@@ -134,38 +141,31 @@ export function createDeliveryModule(options = {}) {
       };
     }
 
-    let deliveryLogId;
-    try {
-      const result = await query(
-        `INSERT INTO delivery_logs (organizer_id, event_id, guest_id, channel, template, status, provider_ref, error)
-         VALUES ($1, $2, $3, $4, $5, 'queued', NULL, NULL)
-         RETURNING id`,
-        [organizerId, eventId, guestId, channel, template],
-      );
-      deliveryLogId = result.rows[0]?.id;
-    } catch (error) {
-      log({
-        level: 'error',
-        message: 'delivery_log_insert_failed',
-        error: error.message,
-        event_id: eventId,
-        guest_id: guestId,
-        request_id: requestId,
-      });
-    }
+    const sanitizedMetadata = sanitizeMetadata(metadata);
+
+    const request = await createDeliveryRequest({
+      organizerId,
+      eventId,
+      guestId,
+      channel,
+      template,
+      payload,
+      metadata: sanitizedMetadata,
+      dedupeKey,
+    });
 
     const queues = await queuesPromise;
     const outboundQueue = queues.waOutboundQueue || queues.deliveryQueue;
     const jobPayload = {
-      deliveryLogId,
+      requestId: request.id,
       eventId,
       guestId,
       organizerId,
       channel,
       template,
       payload,
-      metadata: sanitizeMetadata(metadata),
-      requestId,
+      metadata: sanitizedMetadata,
+      requestIdHeader: requestId,
     };
 
     const jobOptions = {
@@ -189,35 +189,47 @@ export function createDeliveryModule(options = {}) {
         guest_id: guestId,
         request_id: requestId,
       });
-      if (deliveryLogId) {
-        await query(
-          `UPDATE delivery_logs SET status = 'failed', error = $1::jsonb, updated_at = now() WHERE id = $2`,
-          [JSON.stringify({ message: error.message, stage: 'enqueue' }), deliveryLogId],
-        );
-      }
+      await markRequestFailureOnEnqueue(request.id, error);
       throw error;
     }
+
+    await recordJobQueued(request.id, job.id);
 
     log({
       level: 'info',
       message: 'delivery_enqueued',
       job_id: job.id,
-      delivery_log_id: deliveryLogId,
+      request_id: request.id,
+      correlation_id: request.correlationId,
       channel,
       event_id: eventId,
       guest_id: guestId,
-      request_id: requestId,
+      template,
     });
 
     return {
       guestId,
       status: 'queued',
       jobId: job.id,
-      deliveryLogId,
+      requestId: request.id,
+      correlationId: request.correlationId,
     };
   }
 
-  async function enqueueWebhook({ body = {}, requestId }) {
+  async function enqueueWebhook({ body = {}, headers = {}, requestId }) {
+    const secret = env.WA_WEBHOOK_SECRET;
+    if (secret) {
+      const signature = findSignatureHeader(headers);
+      if (!signature || signature !== secret) {
+        log({
+          level: 'warn',
+          message: 'wa_webhook_signature_invalid',
+          request_id: requestId,
+        });
+        return { statusCode: 401, payload: { error: 'invalid_signature' } };
+      }
+    }
+
     const queues = await queuesPromise;
     const inboundQueue = queues.waInboundQueue;
     const jobPayload = {
@@ -252,22 +264,23 @@ export function createDeliveryModule(options = {}) {
       return { statusCode: 400, payload: { error: 'delivery_id_required' } };
     }
 
-    const lookup = await findDeliveryStatus(deliveryId);
-    if (!lookup) {
+    let summary;
+    if (/^\d+$/.test(deliveryId)) {
+      summary = await findDeliverySummaryByRequestId(Number(deliveryId));
+      if (!summary) {
+        summary = await findDeliveryAttemptById(Number(deliveryId));
+      }
+    } else {
+      summary = await findDeliverySummaryByProviderRef(deliveryId);
+    }
+
+    if (!summary) {
       return { statusCode: 404, payload: { error: 'not_found' } };
     }
 
     return {
       statusCode: 200,
-      payload: {
-        deliveryId: lookup.id,
-        status: lookup.status,
-        channel: lookup.channel,
-        template: lookup.template,
-        providerRef: lookup.provider_ref,
-        error: lookup.error,
-        updatedAt: lookup.updated_at,
-      },
+      payload: summary,
     };
   }
 
@@ -353,10 +366,6 @@ function selectChannel(channel) {
   return DEFAULT_CHANNEL;
 }
 
-function getSessionKey(phone) {
-  return `wa:session:${phone}`;
-}
-
 function collectGuestIds(body) {
   if (Array.isArray(body.guestIds)) {
     return body.guestIds.filter((id) => typeof id === 'string').map((id) => id.trim()).filter(Boolean);
@@ -388,12 +397,76 @@ function buildDedupeKey({ eventId, guestId, template }) {
   return `${DEDUPE_PREFIX}:${eventId || 'unknown'}:${guestId || 'unknown'}:${template}`;
 }
 
-async function findRecentDeliveryLog({ eventId, guestId, template, windowMinutes }) {
+async function createDeliveryRequest({
+  organizerId,
+  eventId,
+  guestId,
+  channel,
+  template,
+  payload,
+  metadata,
+  dedupeKey,
+}) {
+  const payloadJson = JSON.stringify(payload ?? {});
+  const metadataJson = metadata ? JSON.stringify(metadata) : null;
+  const result = await query(
+    `
+      INSERT INTO delivery_requests (
+        organizer_id,
+        event_id,
+        guest_id,
+        channel,
+        template,
+        payload,
+        metadata,
+        dedupe_key
+      )
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+      RETURNING id, correlation_id
+    `,
+    [organizerId, eventId, guestId, channel, template, payloadJson, metadataJson, dedupeKey],
+  );
+  return {
+    id: result.rows[0].id,
+    correlationId: result.rows[0].correlation_id,
+  };
+}
+
+async function recordJobQueued(requestId, jobId) {
+  await query(
+    `
+      UPDATE delivery_requests
+         SET last_job_id = $1,
+             current_status = 'queued',
+             updated_at = now()
+       WHERE id = $2
+    `,
+    [jobId, requestId],
+  );
+}
+
+async function markRequestFailureOnEnqueue(requestId, error) {
+  await query(
+    `
+      UPDATE delivery_requests
+         SET current_status = 'failed',
+             last_error = $1::jsonb,
+             updated_at = now()
+       WHERE id = $2
+    `,
+    [JSON.stringify({ message: error.message, stage: 'enqueue' }), requestId],
+  );
+}
+
+async function findRecentDeliveryRequest({ eventId, guestId, template, windowMinutes }) {
   const interval = Math.max(1, Number(windowMinutes || DEFAULT_DEDUPE_WINDOW_MINUTES));
   const result = await query(
-    `SELECT id, status
-       FROM delivery_logs
-      WHERE event_id = $1 AND guest_id = $2 AND template = $3 AND created_at >= now() - ($4 || ' minutes')::interval
+    `SELECT id, current_status
+       FROM delivery_requests
+      WHERE event_id = $1
+        AND guest_id = $2
+        AND template = $3
+        AND created_at >= now() - ($4 || ' minutes')::interval
       ORDER BY created_at DESC
       LIMIT 1`,
     [eventId, guestId, template, interval],
@@ -401,16 +474,128 @@ async function findRecentDeliveryLog({ eventId, guestId, template, windowMinutes
   return result?.rows?.[0] || null;
 }
 
-async function findDeliveryStatus(identifier) {
-  if (/^\d+$/.test(identifier)) {
-    const result = await query('SELECT * FROM delivery_logs WHERE id = $1', [Number(identifier)]);
-    return result.rows[0] || null;
-  }
+async function findDeliverySummaryByRequestId(requestId) {
   const result = await query(
-    `SELECT * FROM delivery_logs WHERE provider_ref = $1 ORDER BY updated_at DESC LIMIT 1`,
-    [identifier],
+    `
+      SELECT
+        dr.*,
+        latest.id AS attempt_id,
+        latest.attempt AS attempt_number,
+        latest.status AS attempt_status,
+        latest.provider_ref AS attempt_provider_ref,
+        latest.error AS attempt_error,
+        latest.started_at AS attempt_started_at,
+        latest.completed_at AS attempt_completed_at,
+        latest.created_at AS attempt_created_at
+      FROM delivery_requests dr
+      LEFT JOIN LATERAL (
+        SELECT *
+          FROM delivery_logs
+         WHERE request_id = dr.id
+         ORDER BY attempt DESC
+         LIMIT 1
+      ) AS latest ON TRUE
+      WHERE dr.id = $1
+    `,
+    [requestId],
   );
-  return result.rows[0] || null;
+
+  if (result.rowCount === 0) {
+    return null;
+  }
+
+  const row = result.rows[0];
+  return mapDeliverySummary(row);
+}
+
+async function findDeliverySummaryByProviderRef(providerRef) {
+  const result = await query(
+    `
+      SELECT
+        dr.*,
+        dl.id AS attempt_id,
+        dl.attempt AS attempt_number,
+        dl.status AS attempt_status,
+        dl.provider_ref AS attempt_provider_ref,
+        dl.error AS attempt_error,
+        dl.started_at AS attempt_started_at,
+        dl.completed_at AS attempt_completed_at,
+        dl.created_at AS attempt_created_at
+      FROM delivery_logs dl
+      JOIN delivery_requests dr
+        ON dr.id = dl.request_id
+      WHERE dl.provider_ref = $1
+      ORDER BY dl.created_at DESC
+      LIMIT 1
+    `,
+    [providerRef],
+  );
+
+  if (result.rowCount === 0) {
+    return null;
+  }
+
+  return mapDeliverySummary(result.rows[0]);
+}
+
+async function findDeliveryAttemptById(attemptId) {
+  const result = await query(
+    `
+      SELECT
+        dr.*,
+        dl.id AS attempt_id,
+        dl.attempt AS attempt_number,
+        dl.status AS attempt_status,
+        dl.provider_ref AS attempt_provider_ref,
+        dl.error AS attempt_error,
+        dl.started_at AS attempt_started_at,
+        dl.completed_at AS attempt_completed_at,
+        dl.created_at AS attempt_created_at
+      FROM delivery_logs dl
+      JOIN delivery_requests dr
+        ON dr.id = dl.request_id
+      WHERE dl.id = $1
+      LIMIT 1
+    `,
+    [attemptId],
+  );
+
+  if (result.rowCount === 0) {
+    return null;
+  }
+
+  return mapDeliverySummary(result.rows[0]);
+}
+
+function mapDeliverySummary(row) {
+  return {
+    requestId: row.id,
+    correlationId: row.correlation_id,
+    eventId: row.event_id,
+    guestId: row.guest_id,
+    organizerId: row.organizer_id,
+    channel: row.channel,
+    template: row.template,
+    currentStatus: row.current_status,
+    attemptCount: row.attempt_count,
+    lastProviderRef: row.last_provider_ref,
+    lastError: row.last_error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastJobId: row.last_job_id,
+    latestAttempt: row.attempt_id
+      ? {
+          id: row.attempt_id,
+          attempt: row.attempt_number,
+          status: row.attempt_status,
+          providerRef: row.attempt_provider_ref,
+          error: row.attempt_error,
+          startedAt: row.attempt_started_at,
+          completedAt: row.attempt_completed_at,
+          createdAt: row.attempt_created_at,
+        }
+      : null,
+  };
 }
 
 function sanitizeMetadata(metadata) {
@@ -419,7 +604,24 @@ function sanitizeMetadata(metadata) {
   }
   try {
     return JSON.parse(JSON.stringify(metadata));
-  } catch (error) {
+  } catch {
     return null;
   }
+}
+
+function getSessionKey(phone) {
+  return `wa:session:${phone}`;
+}
+
+function findSignatureHeader(headers = {}) {
+  const headerEntries = Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]);
+  for (const candidate of SIGNATURE_HEADER_KEYS) {
+    const match = headerEntries.find(([key]) => key === candidate);
+    if (!match) continue;
+    const value = Array.isArray(match[1]) ? match[1][0] : match[1];
+    if (typeof value === 'string') {
+      return value.trim();
+    }
+  }
+  return '';
 }

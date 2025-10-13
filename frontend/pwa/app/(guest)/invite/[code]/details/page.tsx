@@ -1,7 +1,7 @@
 import type React from 'react';
 import { notFound } from 'next/navigation';
-import { getInvite } from '../../../../lib/api/guest';
-import { themeToStyle } from '../../../../lib/theme/overrides';
+import { getInvite } from '@/lib/api/guest';
+import { themeToStyle } from '@/lib/theme/overrides';
 import { EventInfo } from '../_components/EventInfo';
 
 interface PageProps {

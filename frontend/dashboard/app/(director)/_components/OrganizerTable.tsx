@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import { OrganizerRecord } from '../../../lib/api/director';
-import { colors, typography, spacing } from '../../../shared/theme';
+import { OrganizerRecord } from '@/lib/api/director';
+import { colors, typography, spacing } from '@shared/theme';
 
 interface OrganizerTableProps {
   organizers: OrganizerRecord[];

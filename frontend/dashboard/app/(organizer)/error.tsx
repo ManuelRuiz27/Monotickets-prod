@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { spacing, typography, colors } from '../../shared/theme';
+import { spacing, typography, colors } from '@shared/theme';
 
 interface ErrorPageProps {
   error: Error;

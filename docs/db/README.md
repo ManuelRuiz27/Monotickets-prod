@@ -32,10 +32,10 @@ DATABASE_URL="postgresql://postgres:postgres@localhost:5432/monotickets" ./infra
 
 Al finalizar, deberías tener:
 
-- 2 organizadores con precios diferenciados.
+- 10 organizadores con precios diferenciados, estados (`active/suspended/archived`) y metadatos para billing.
 - 2 eventos activos (standard y premium) con 16 invitados cada uno.
 - Bitácoras de envíos y escaneos (>80 registros) con datos distribuidos en las dos particiones mensuales de `scan_logs`.
-- Tablas financieras (`ticket_ledger`, `payments`) preparadas para cálculos de deuda y equivalencias.
+- Tablas financieras (`ticket_ledger`, `payments`) con >30 movimientos para cálculos de deuda y conciliación.
 - Vistas materializadas refrescadas (`mv_*`) listas para su consumo en Metabase.
 
 ## 3. Refrescos programados

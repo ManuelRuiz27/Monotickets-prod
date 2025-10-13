@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { colors, typography, spacing, cardStyles } from '../../../../../shared/theme';
+import { colors, typography, spacing, cardStyles } from '@shared/theme';
 
 interface StageMetricsProps {
   stage: 'before' | 'during';

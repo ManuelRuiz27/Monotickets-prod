@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import { getDirectorOrganizers, OrganizerRecord } from '../../../lib/api/director';
-import { colors, spacing, typography, cardStyles } from '../../../shared/theme';
+import { getDirectorOrganizers, OrganizerRecord } from '@/lib/api/director';
+import { colors, spacing, typography, cardStyles } from '@shared/theme';
 import { OrganizerActions } from '../_components/OrganizerActions';
 
 const cardStyle = parseStyles(cardStyles);

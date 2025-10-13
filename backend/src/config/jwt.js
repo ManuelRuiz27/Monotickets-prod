@@ -19,6 +19,17 @@ export function getJwtExpirations(env = process.env) {
   };
 }
 
+export function getJwtClaims(env = process.env) {
+  const issuer = (env.JWT_ISSUER || 'monotickets.api').trim();
+  const audience = (env.JWT_AUDIENCE || 'monotickets.clients').trim();
+
+  if (!issuer || !audience) {
+    throw new Error('JWT issuer and audience must be configured');
+  }
+
+  return { issuer, audience };
+}
+
 function readDuration(env, key) {
   const rawValue = (env[key] || DEFAULTS[key]).trim();
   const match = rawValue.match(/^(\d+)([smhd])$/i);
@@ -41,4 +52,5 @@ export const internals = {
   readDuration,
   UNIT_IN_SECONDS,
   DEFAULTS,
+  getJwtClaims,
 };

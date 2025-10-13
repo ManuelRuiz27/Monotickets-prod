@@ -1,7 +1,7 @@
 import type React from 'react';
 import { notFound } from 'next/navigation';
-import { getInviteLanding } from '../../../lib/api/guest';
-import { themeToStyle } from '../../../lib/theme/overrides';
+import { getInviteLanding } from '@/lib/api/guest';
+import { themeToStyle } from '@/lib/theme/overrides';
 import { HeroCover } from './_components/HeroCover';
 
 interface PageProps {

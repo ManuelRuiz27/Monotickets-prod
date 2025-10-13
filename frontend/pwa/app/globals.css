@@ -1,0 +1,48 @@
+:root {
+  color-scheme: light;
+  --guest-color-primary: #2563eb;
+  --guest-color-secondary: #0f172a;
+  --guest-color-background: #f8fafc;
+  --guest-color-text: #0f172a;
+  --guest-color-accent: #10b981;
+  --guest-font-heading: 'Poppins', system-ui, sans-serif;
+  --guest-font-body: 'Inter', system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--guest-font-body);
+  background: var(--guest-color-background);
+  color: var(--guest-color-text);
+}
+
+a {
+  color: inherit;
+}
+
+.guest-theme-surface {
+  display: contents;
+}
+
+main {
+  width: min(960px, 92vw);
+  margin: 0 auto;
+  padding: clamp(24px, 5vw, 48px) 0;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(circle at 15% 20%, rgba(37, 99, 235, 0.18), transparent 55%),
+    radial-gradient(circle at 75% 10%, rgba(16, 185, 129, 0.18), transparent 50%),
+    #f8fafc;
+}

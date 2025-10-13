@@ -7,8 +7,8 @@ import {
   EventSummary,
   EventStatus,
   LandingKind,
-} from '../../../../lib/api/organizer';
-import { colors, typography, spacing, cardStyles, buttonStyles } from '../../../../shared/theme';
+} from '@/lib/api/organizer';
+import { colors, typography, spacing, cardStyles, buttonStyles } from '@shared/theme';
 
 const cardStyle = parseStyles(cardStyles);
 const primaryButton = parseStyles(buttonStyles.primary);

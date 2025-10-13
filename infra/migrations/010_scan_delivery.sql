@@ -1,13 +1,15 @@
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS scan_logs (
-    id bigserial PRIMARY KEY,
+    id bigserial,
     event_id uuid NOT NULL,
     guest_id uuid NOT NULL,
     staff_id uuid,
     result text NOT NULL CHECK (result IN ('valid', 'duplicate', 'invalid')),
     ts timestamptz NOT NULL DEFAULT now(),
-    device jsonb
+    created_at timestamptz GENERATED ALWAYS AS (ts) STORED,
+    device jsonb,
+    PRIMARY KEY (id, ts)
 ) PARTITION BY RANGE (ts);
 
 -- Particiones mensuales para el mes anterior y el actual.

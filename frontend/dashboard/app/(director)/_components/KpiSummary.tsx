@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import type { DirectorOverview } from '../../../lib/api/director';
-import { colors, typography, spacing, cardStyles } from '../../../shared/theme';
+import type { DirectorOverview } from '@/lib/api/director';
+import { colors, typography, spacing, cardStyles } from '@shared/theme';
 
 const cardStyle = parseStyles(cardStyles);
 

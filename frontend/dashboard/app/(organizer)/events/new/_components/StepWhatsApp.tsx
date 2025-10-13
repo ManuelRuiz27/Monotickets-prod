@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import type { Guest, WhatsappLink } from '../../../../../lib/api/organizer';
-import { colors, typography, spacing, buttonStyles } from '../../../../../shared/theme';
+import type { Guest, WhatsappLink } from '@/lib/api/organizer';
+import { colors, typography, spacing, buttonStyles } from '@shared/theme';
 
 const primaryButton = parseStyles(buttonStyles.primary);
 const secondaryButton = parseStyles(buttonStyles.secondary);

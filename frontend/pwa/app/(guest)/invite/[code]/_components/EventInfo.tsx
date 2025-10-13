@@ -5,8 +5,8 @@ import type {
   GuestSummary,
   InviteTemplateKind,
   TemplateLinks,
-} from '../../../../lib/api/guest';
-import { withThemeClassName } from '../../../../lib/theme/overrides';
+} from '@/lib/api/guest';
+import { withThemeClassName } from '@/lib/theme/overrides';
 import { CalendarCTA } from './CalendarCTA';
 
 interface EventInfoProps {

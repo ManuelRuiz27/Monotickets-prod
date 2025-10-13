@@ -56,13 +56,14 @@ CREATE MATERIALIZED VIEW mv_wa_free_ratio_daily
 AS
 WITH whatsapp_logs AS (
     SELECT
-        dl.event_id,
-        dl.guest_id,
+        dr.event_id,
+        dr.guest_id,
         dl.created_at,
         date_trunc('day', dl.created_at) AS day,
-        MIN(dl.created_at) OVER (PARTITION BY dl.event_id, dl.guest_id) AS first_contact
+        MIN(dl.created_at) OVER (PARTITION BY dr.event_id, dr.guest_id) AS first_contact
     FROM delivery_logs dl
-    WHERE dl.channel = 'whatsapp'
+    JOIN delivery_requests dr ON dr.id = dl.request_id
+    WHERE dr.channel = 'whatsapp'
       AND dl.status IN ('sent', 'delivered')
 ),
 classified AS (

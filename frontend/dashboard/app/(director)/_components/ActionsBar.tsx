@@ -7,8 +7,8 @@ import {
   createPayment,
   OrganizerRecord,
   PricingUpdatePayload,
-} from '../../../lib/api/director';
-import { colors, spacing, typography, inputStyles } from '../../../shared/theme';
+} from '@/lib/api/director';
+import { colors, spacing, typography, inputStyles } from '@shared/theme';
 
 const inputStyle = parseStyles(inputStyles);
 

@@ -1,7 +1,7 @@
 import type React from 'react';
 import { notFound } from 'next/navigation';
-import { getInvite, getInviteQr } from '../../../../lib/api/guest';
-import { themeToStyle } from '../../../../lib/theme/overrides';
+import { getInvite, getInviteQr } from '@/lib/api/guest';
+import { themeToStyle } from '@/lib/theme/overrides';
 
 interface PageProps {
   params: { code: string };

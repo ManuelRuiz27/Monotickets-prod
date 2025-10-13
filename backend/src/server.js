@@ -1,12 +1,16 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
+import packageJson from '../package.json' assert { type: 'json' };
 
 import {
   signAccessToken,
   signStaffToken,
   signViewerToken,
 } from './auth/tokens.js';
+import { runMiddlewareStack } from './http/middleware.js';
+import { createJwtAuthMiddleware } from './auth/middleware.js';
+import { RBAC, authorizeAction } from './auth/rbac.js';
 import { createLogger } from './logging.js';
 import { createQueues } from './queues/index.js';
 import { createDeliveryModule } from './modules/delivery.js';
@@ -14,10 +18,24 @@ import { createDirectorModule } from './modules/director.js';
 import { createPaymentsModule } from './modules/payments.js';
 import { query } from './db/index.js';
 import { ensureRedis } from './redis/client.js';
+import { hitRateLimit } from './lib/rate-limit.js';
 
 const DEFAULT_APP_ENV = 'development';
 const HISTOGRAM_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
 const metricsRegistry = new Map();
+const APP_VERSION = packageJson.version || '0.0.0';
+const APP_BOOT_TIME_MS = Date.now();
+const DEFAULT_GUEST_LIST_LIMIT = 50;
+const RATE_LIMIT_WINDOW_SECONDS = Number(process.env.RATE_LIMIT_WINDOW_SECONDS || 60);
+const RATE_LIMIT_SCAN = Number(process.env.RATE_LIMIT_SCAN || 30);
+const RATE_LIMIT_WEBHOOK = Number(process.env.RATE_LIMIT_WEBHOOK || 120);
+const RATE_LIMIT_DELIVER_SEND = Number(process.env.RATE_LIMIT_DELIVER_SEND || 60);
+const RATE_LIMIT_DELIVER_LEGACY = Number(process.env.RATE_LIMIT_DELIVER_LEGACY || 45);
+const RATE_LIMIT_PAYMENTS_INTENT = Number(process.env.RATE_LIMIT_PAYMENTS_INTENT || 30);
+const RATE_LIMIT_DIRECTOR_ASSIGN = Number(process.env.RATE_LIMIT_DIRECTOR_ASSIGN || 20);
+const RATE_LIMIT_DIRECTOR_PAYMENTS = Number(process.env.RATE_LIMIT_DIRECTOR_PAYMENTS || 20);
+const RATE_LIMIT_DIRECTOR_OVERVIEW = Number(process.env.RATE_LIMIT_DIRECTOR_OVERVIEW || 30);
+const RATE_LIMIT_DIRECTOR_LEDGER = Number(process.env.RATE_LIMIT_DIRECTOR_LEDGER || 30);
 
 function observeHttpDuration({ method, path, status, durationMs }) {
   const key = `${method.toUpperCase()}::${status}::${path}`;
@@ -77,16 +95,37 @@ export function createServer(options = {}) {
   const deliveryModule = createDeliveryModule({ env, logger, queuesPromise });
   const directorModule = createDirectorModule({ env, logger });
   const paymentsModule = createPaymentsModule({ env, logger, queuesPromise });
+  const middlewares = [createJwtAuthMiddleware({ env, logger })];
 
   attachQueueObservers(queuesPromise, logger, env);
 
   return http.createServer(async (req, res) => {
     const startedAt = process.hrtime.bigint();
-    const requestId = req.headers['x-request-id'] || randomUUID();
+    let requestId = req.headers['x-request-id'] || randomUUID();
     res.setHeader('x-request-id', requestId);
     const url = new URL(req.url, `http://${req.headers.host}`);
     const method = req.method ?? 'GET';
     const requestContext = { eventId: undefined };
+    const middlewareContext = {
+      env,
+      logger,
+      requestId,
+      method,
+      url,
+    };
+    const middlewareResult = await runMiddlewareStack(middlewares, req, res, middlewareContext);
+    if (middlewareResult.halted || res.writableEnded) {
+      return;
+    }
+    if (middlewareContext.requestId && middlewareContext.requestId !== requestId) {
+      requestId = middlewareContext.requestId;
+      res.setHeader('x-request-id', requestId);
+    }
+    const auth = middlewareContext.auth || { user: null, error: 'missing_token', token: null };
+    const clientFingerprint = getClientFingerprint(req);
+    if (auth.user?.id) {
+      requestContext.userId = auth.user.id;
+    }
 
     try {
       if (method === 'GET' && url.pathname === '/metrics') {
@@ -96,25 +135,90 @@ export function createServer(options = {}) {
       }
 
       if (method === 'GET' && url.pathname === '/health') {
-        return sendJson(res, 200, { status: 'ok', env: env.APP_ENV || DEFAULT_APP_ENV });
+        return sendJson(res, 200, {
+          status: 'ok',
+          env: env.APP_ENV || DEFAULT_APP_ENV,
+          version: APP_VERSION,
+          uptimeMs: Date.now() - APP_BOOT_TIME_MS,
+        });
       }
 
       if (method === 'POST' && url.pathname === '/deliver/send') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DELIVER_SEND,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+
+        const rateKey = [
+          'ratelimit',
+          'deliver',
+          'send',
+          auth.user?.id || 'anonymous',
+          clientFingerprint,
+        ].join(':');
+        const deliverLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_DELIVER_SEND,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!deliverLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
         const body = await readJsonBody(req, logger);
         const { statusCode, payload } = await deliveryModule.send({ body, requestId });
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
       if (method === 'POST' && url.pathname === '/deliver/webhook') {
+        const rateKey = `ratelimit:webhook:${clientFingerprint}`;
+        const webhookLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_WEBHOOK,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!webhookLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
         const body = await readJsonBody(req, logger);
         const { statusCode, payload } = await deliveryModule.enqueueWebhook({
           body,
+          headers: req.headers,
           requestId,
         });
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
       if (method === 'GET' && /^\/deliver\/.+\/status$/.test(url.pathname)) {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DELIVER_STATUS,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
         const deliveryId = url.pathname.split('/')[2];
         const { statusCode, payload } = await deliveryModule.getStatus({ deliveryId });
         return sendJson(res, statusCode, { ...payload, requestId });
@@ -124,8 +228,42 @@ export function createServer(options = {}) {
         method === 'POST' &&
         /^\/events\/[^/]+\/guests\/[^/]+\/send$/.test(url.pathname)
       ) {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DELIVER_LEGACY_SEND,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
         const [, , eventId, , guestId] = url.pathname.split('/');
         requestContext.eventId = eventId;
+
+        const rateKey = [
+          'ratelimit',
+          'deliver',
+          'legacy',
+          auth.user?.id || 'anonymous',
+          eventId || 'unknown',
+          clientFingerprint,
+        ].join(':');
+        const legacyLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_DELIVER_LEGACY,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!legacyLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
         const body = await readJsonBody(req, logger);
         const { statusCode, payload } = await deliveryModule.enqueueLegacySend({
           eventId,
@@ -143,6 +281,38 @@ export function createServer(options = {}) {
       }
 
       if (method === 'GET' && url.pathname === '/director/overview') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DIRECTOR_OVERVIEW,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+        const overviewRateKey = [
+          'ratelimit',
+          'director',
+          'overview',
+          auth.user?.id || 'anonymous',
+          clientFingerprint,
+        ].join(':');
+        const overviewLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: overviewRateKey,
+          limit: RATE_LIMIT_DIRECTOR_OVERVIEW,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!overviewLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
         const { statusCode, payload, headers } = await directorModule.getOverview();
         if (headers) {
           Object.entries(headers).forEach(([key, value]) => {
@@ -153,24 +323,156 @@ export function createServer(options = {}) {
       }
 
       if (method === 'POST' && url.pathname === '/director/assign') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DIRECTOR_ASSIGN,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+        const rateKey = [
+          'ratelimit',
+          'director',
+          'assign',
+          auth.user?.id || 'anonymous',
+          clientFingerprint,
+        ].join(':');
+        const assignLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_DIRECTOR_ASSIGN,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!assignLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
         const body = await readJsonBody(req, logger);
         const { statusCode, payload } = await directorModule.assignTickets({ body, requestId });
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
       if (method === 'GET' && /^\/director\/organizers\/.+\/ledger$/.test(url.pathname)) {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DIRECTOR_LEDGER,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
         const organizerId = url.pathname.split('/')[3];
+
+        const ledgerRateKey = [
+          'ratelimit',
+          'director',
+          'ledger',
+          auth.user?.id || 'anonymous',
+          organizerId || 'unknown',
+          clientFingerprint,
+        ].join(':');
+        const ledgerLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: ledgerRateKey,
+          limit: RATE_LIMIT_DIRECTOR_LEDGER,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!ledgerLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
         const { statusCode, payload } = await directorModule.getOrganizerLedger({ organizerId });
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
       if (method === 'POST' && url.pathname === '/director/payments') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DIRECTOR_PAYMENTS,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+
+        const rateKey = [
+          'ratelimit',
+          'director',
+          'payments',
+          auth.user?.id || 'anonymous',
+          clientFingerprint,
+        ].join(':');
+        const directorPaymentsLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_DIRECTOR_PAYMENTS,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!directorPaymentsLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
         const body = await readJsonBody(req, logger);
         const { statusCode, payload } = await directorModule.recordPayment({ body, requestId });
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
       if (method === 'POST' && url.pathname === '/payments/intent') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.PAYMENTS_CREATE_INTENT,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+
+        const rateKey = [
+          'ratelimit',
+          'payments',
+          'intent',
+          auth.user?.id || 'anonymous',
+          clientFingerprint,
+        ].join(':');
+        const paymentsLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_PAYMENTS_INTENT,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!paymentsLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
         const body = await readJsonBody(req, logger);
         const { statusCode, payload } = await paymentsModule.createIntent({ body, requestId });
         return sendJson(res, statusCode, { ...payload, requestId });
@@ -187,22 +489,79 @@ export function createServer(options = {}) {
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
+      if (method === 'GET' && url.pathname === '/guests') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.GUESTS_LIST,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+        const eventIdParam = url.searchParams.get('eventId');
+        const { eventExists, guests } = await fetchGuests({
+          eventId: eventIdParam ?? undefined,
+          limit: DEFAULT_GUEST_LIST_LIMIT,
+        });
+        if (eventIdParam && !eventExists) {
+          return sendJson(res, 404, { error: 'event_not_found', requestId });
+        }
+        return sendJson(res, 200, { guests });
+      }
+
       if (
         method === 'GET' &&
         url.pathname.startsWith('/events/') &&
         url.pathname.endsWith('/guests')
       ) {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.EVENT_GUESTS_LIST,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
         const [, , eventId] = url.pathname.split('/');
-        return sendJson(res, 200, {
-          eventId,
-          guests: [
-            { id: 'guest-1', name: 'Ada Lovelace', checkedIn: true },
-            { id: 'guest-2', name: 'Grace Hopper', checkedIn: false },
-          ],
-        });
+        const { eventExists, guests } = await fetchGuests({ eventId, limit: DEFAULT_GUEST_LIST_LIMIT });
+        if (!eventExists) {
+          return sendJson(res, 404, { error: 'event_not_found', requestId });
+        }
+        return sendJson(res, 200, { eventId, guests });
       }
 
       if (method === 'POST' && url.pathname === '/scan/validate') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.SCAN_VALIDATE,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+
+        const rateKey = `ratelimit:scan:${clientFingerprint}:${auth.user?.id ?? 'anonymous'}`;
+        const scanLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_SCAN,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!scanLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
         const body = await readJsonBody(req, logger);
         const code = typeof body.code === 'string' ? body.code.trim() : '';
         const eventId = typeof body.eventId === 'string' ? body.eventId.trim() : '';
@@ -212,13 +571,45 @@ export function createServer(options = {}) {
           return sendJson(res, 400, { error: 'code_and_event_required', requestId });
         }
 
+        const redis = await ensureRedis({ name: 'scan-locks', env, logger });
+        const idempotencyKey = getIdempotencyKey(req.headers);
+        let idempotencyCacheKey;
+
+        if (idempotencyKey) {
+          idempotencyCacheKey = `scan:idempotency:${eventId}:${idempotencyKey}`;
+          const cachedRaw = await redis.get(idempotencyCacheKey);
+          if (cachedRaw) {
+            try {
+              const cachedResponse = JSON.parse(cachedRaw);
+              if (cachedResponse.body?.requestId) {
+                requestId = cachedResponse.body.requestId;
+                res.setHeader('x-request-id', requestId);
+              }
+              return sendJson(res, cachedResponse.statusCode ?? 200, cachedResponse.body);
+            } catch (error) {
+              log({ level: 'warn', message: 'idempotency_cache_corrupt', error: error.message }, { logger });
+              await redis.del(idempotencyCacheKey);
+            }
+          }
+        }
+
         const lockToken = randomUUID();
-        const redis = await ensureRedis({ name: 'scan-locks', env });
         const lockKey = `scan:lock:${eventId}:${code}`;
         const lockTtlMs = Number(env.SCAN_LOCK_TTL_MS || 1500);
         const lockResult = await redis.set(lockKey, lockToken, 'NX', 'PX', lockTtlMs);
         if (lockResult !== 'OK') {
-          return sendJson(res, 409, { status: 'in_progress', requestId });
+          const responseBody = { status: 'in_progress', requestId };
+          if (idempotencyCacheKey) {
+            await cacheIdempotentResponse({
+              redis,
+              key: idempotencyCacheKey,
+              statusCode: 409,
+              body: responseBody,
+              env,
+              logger,
+            });
+          }
+          return sendJson(res, 409, responseBody);
         }
 
         try {
@@ -233,18 +624,51 @@ export function createServer(options = {}) {
 
           if (inviteResult.rowCount === 0) {
             await appendScanLog({ eventId, guestId: null, result: 'invalid', device: body.device });
-            return sendJson(res, 200, { status: 'invalid', requestId });
+            const responseBody = { error: 'invite_not_found', status: 'invalid', requestId };
+            if (idempotencyCacheKey) {
+              await cacheIdempotentResponse({
+                redis,
+                key: idempotencyCacheKey,
+                statusCode: 404,
+                body: responseBody,
+                env,
+                logger,
+              });
+            }
+            return sendJson(res, 404, responseBody);
           }
 
           const invite = inviteResult.rows[0];
           if (!['confirmed', 'scanned'].includes(invite.status)) {
             await appendScanLog({ eventId, guestId: invite.guest_id, result: 'invalid', device: body.device });
-            return sendJson(res, 200, { status: 'invalid', reason: 'not_confirmed', requestId });
+            const responseBody = { error: 'guest_not_confirmed', status: 'invalid', requestId };
+            if (idempotencyCacheKey) {
+              await cacheIdempotentResponse({
+                redis,
+                key: idempotencyCacheKey,
+                statusCode: 409,
+                body: responseBody,
+                env,
+                logger,
+              });
+            }
+            return sendJson(res, 409, responseBody);
           }
 
           if (invite.status === 'scanned') {
             await appendScanLog({ eventId, guestId: invite.guest_id, result: 'duplicate', device: body.device });
-            return sendJson(res, 200, { status: 'duplicate', requestId });
+            const responseBody = { status: 'duplicate', duplicate: true, requestId };
+            if (idempotencyCacheKey) {
+              await cacheIdempotentResponse({
+                redis,
+                key: idempotencyCacheKey,
+                statusCode: 200,
+                body: responseBody,
+                env,
+                logger,
+              });
+            }
+            return sendJson(res, 200, responseBody);
           }
 
           const updateResult = await query(
@@ -258,7 +682,23 @@ export function createServer(options = {}) {
           const finalStatus = updateResult.rowCount > 0 ? 'valid' : 'duplicate';
           await appendScanLog({ eventId, guestId: invite.guest_id, result: finalStatus === 'valid' ? 'valid' : 'duplicate', device: body.device });
 
-          return sendJson(res, 200, { status: finalStatus, requestId });
+          const responseBody =
+            finalStatus === 'valid'
+              ? { status: 'valid', requestId }
+              : { status: 'duplicate', duplicate: true, requestId };
+
+          if (idempotencyCacheKey) {
+            await cacheIdempotentResponse({
+              redis,
+              key: idempotencyCacheKey,
+              statusCode: 200,
+              body: responseBody,
+              env,
+              logger,
+            });
+          }
+
+          return sendJson(res, 200, responseBody);
         } finally {
           const current = await redis.get(lockKey);
           if (current === lockToken) {
@@ -323,10 +763,13 @@ export function createServer(options = {}) {
           message: 'request_completed',
           method,
           path: url.pathname,
+          route: url.pathname,
           status: res.statusCode,
           request_id: requestId,
           latency_ms: Number(latencyMs.toFixed(3)),
           event_id: requestContext.eventId,
+          user_role: auth.user?.role,
+          user_id: auth.user?.id,
         },
         { logger },
       );
@@ -352,7 +795,7 @@ function attachQueueObservers(queuesPromise, logger, env) {
               message: 'queue_job_failed',
               queue: name,
               job_id: jobId,
-              delivery_log_id: job?.deliveryLogId,
+              request_id: job?.requestId,
             },
             { logger },
           );
@@ -364,7 +807,7 @@ function attachQueueObservers(queuesPromise, logger, env) {
               message: 'queue_job_dead_letter',
               queue: name,
               job_id: jobId,
-              delivery_log_id: job?.deliveryLogId,
+              request_id: job?.requestId,
             },
             { logger },
           );
@@ -515,10 +958,144 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function fetchGuests({ eventId, limit = DEFAULT_GUEST_LIST_LIMIT }) {
+  let eventExists = true;
+  if (eventId) {
+    const eventResult = await query('SELECT id FROM events WHERE id = $1 LIMIT 1', [eventId]);
+    if (eventResult.rowCount === 0) {
+      eventExists = false;
+      return { eventExists, guests: [] };
+    }
+  }
+
+  const params = [];
+  let sql = `
+    SELECT id, event_id, name, phone, status, created_at
+      FROM guests
+  `;
+
+  if (eventId) {
+    params.push(eventId);
+    sql += ' WHERE event_id = $1';
+  }
+
+  sql += ' ORDER BY created_at DESC';
+
+  if (!eventId) {
+    params.push(limit);
+    sql += ` LIMIT $${params.length}`;
+  }
+
+  const result = await query(sql, params);
+  const guests = result.rows.map((row) => ({
+    id: row.id,
+    eventId: row.event_id,
+    name: row.name,
+    phone: row.phone,
+    status: row.status,
+    checkedIn: row.status === 'scanned',
+  }));
+
+  return { eventExists, guests };
+}
+
+function getIdempotencyKey(headers = {}) {
+  const raw = headers['idempotency-key'] || headers['x-idempotency-key'];
+  if (!raw) return '';
+  if (Array.isArray(raw)) {
+    return typeof raw[0] === 'string' ? raw[0].trim() : '';
+  }
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+async function cacheIdempotentResponse({ redis, key, statusCode, body, env, logger }) {
+  if (!key) return;
+  const ttl = Number(env.SCAN_IDEMPOTENCY_TTL_MS || 10 * 60 * 1000);
+  try {
+    await redis.set(key, JSON.stringify({ statusCode, body }), 'PX', ttl);
+  } catch (error) {
+    log(
+      { level: 'warn', message: 'idempotency_cache_write_failed', error: error.message },
+      { logger },
+    );
+  }
+}
+
+function getClientFingerprint(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  if (Array.isArray(forwarded) && forwarded.length > 0) {
+    return forwarded[0].trim();
+  }
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+async function enforceRateLimit({ env, logger, res, key, limit, windowSeconds, requestId, path }) {
+  const result = await hitRateLimit({ env, logger, key, limit, windowSeconds });
+
+  if (res) {
+    res.setHeader('X-RateLimit-Limit', String(limit));
+    res.setHeader('X-RateLimit-Remaining', String(result.remaining));
+    res.setHeader('X-RateLimit-Window', String(windowSeconds));
+    if (!result.allowed && result.retryAfterSeconds) {
+      res.setHeader('Retry-After', String(result.retryAfterSeconds));
+    }
+  }
+
+  if (!result.allowed) {
+    log(
+      {
+        level: 'warn',
+        message: 'rate_limit_exceeded',
+        key,
+        path,
+        request_id: requestId,
+        remaining: result.remaining,
+        limit,
+        window_seconds: windowSeconds,
+        retry_after_seconds: result.retryAfterSeconds,
+      },
+      { logger },
+    );
+  }
+  return result;
+}
+
+function requireAction({ auth, action, res, requestId, logger, path }) {
+  const decision = authorizeAction({ auth, action });
+  if (decision.allowed) {
+    return true;
+  }
+
+  const status = decision.status ?? 403;
+  const reason = decision.reason || 'forbidden';
+  const error = status >= 500 ? 'authorization_error' : reason;
+
+  log(
+    {
+      level: status >= 500 ? 'error' : 'warn',
+      message: 'authorization_denied',
+      reason,
+      path,
+      request_id: requestId,
+      user_role: auth.user?.role,
+      action,
+      allowed_roles: decision.allowedRoles,
+    },
+    { logger },
+  );
+
+  sendJson(res, status, { error, requestId });
+  return false;
+}
+
 export const internals = {
   readBody,
   readJsonBody,
   sendJson,
   waitForPort,
   delay,
+  getClientFingerprint,
 };

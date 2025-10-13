@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import { typography, colors, spacing, inputStyles } from '../../../../../shared/theme';
-import { EventDetail } from '../../../../../lib/api/organizer';
+import { typography, colors, spacing, inputStyles } from '@shared/theme';
+import { EventDetail } from '@/lib/api/organizer';
 
 const inputStyle = parseStyles(inputStyles);
 

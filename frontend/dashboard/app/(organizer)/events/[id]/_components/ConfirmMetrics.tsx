@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import { ConfirmationMetrics } from '../../../../../lib/api/organizer';
-import { colors, typography, spacing, cardStyles } from '../../../../../shared/theme';
+import { ConfirmationMetrics } from '@/lib/api/organizer';
+import { colors, typography, spacing, cardStyles } from '@shared/theme';
 
 interface ConfirmMetricsProps {
   metrics?: ConfirmationMetrics;

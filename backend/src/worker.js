@@ -46,12 +46,12 @@ async function bootstrapDeliveryWorker() {
         level: 'info',
         message: 'delivery_job_processing',
         job_id: job.id,
-        delivery_log_id: job.data.deliveryLogId,
+        request_id: job.data.requestId,
         event_id: job.data.eventId,
         guest_id: job.data.guestId,
         attempt: job.attemptsMade + 1,
       });
-      await processDeliveryJob(job.data);
+      await processDeliveryJob(job);
     },
     {
       logger,
@@ -63,10 +63,10 @@ async function bootstrapDeliveryWorker() {
 
   const events = new SimpleQueueEvents(deliveryQueueName, { connectionOptions: { env, logger } });
   events.on('failed', ({ jobId, job }) => {
-    logger({ level: 'error', message: 'delivery_job_failed', job_id: jobId, delivery_log_id: job?.deliveryLogId });
+    logger({ level: 'error', message: 'delivery_job_failed', job_id: jobId, request_id: job?.requestId });
   });
   events.on('dead-letter', ({ jobId, job }) => {
-    logger({ level: 'error', message: 'delivery_job_dead_letter', job_id: jobId, delivery_log_id: job?.deliveryLogId });
+    logger({ level: 'error', message: 'delivery_job_dead_letter', job_id: jobId, request_id: job?.requestId });
   });
   events.start();
 
@@ -127,50 +127,155 @@ async function bootstrapPaymentsWorker() {
   return worker;
 }
 
-async function processDeliveryJob(data) {
-  const { deliveryLogId, guestId, channel, template, payload } = data;
+async function processDeliveryJob(job) {
+  const data = job?.data || {};
+  const requestId = data.requestId;
+  if (!requestId) {
+    logger({ level: 'error', message: 'delivery_request_missing', job_id: job.id });
+    return;
+  }
+
+  const requestResult = await query('SELECT * FROM delivery_requests WHERE id = $1', [requestId]);
+  if (requestResult.rowCount === 0) {
+    logger({ level: 'error', message: 'delivery_request_missing_in_db', request_id: requestId, job_id: job.id });
+    return;
+  }
+  const request = requestResult.rows[0];
+
+  const attempt = await beginDeliveryAttempt({
+    requestId,
+    metadata: data.metadata,
+  });
+  if (!attempt) {
+    logger({ level: 'error', message: 'delivery_attempt_not_created', request_id: requestId, job_id: job.id });
+    return;
+  }
+
+  logger({
+    level: 'info',
+    message: 'delivery_attempt_started',
+    request_id: requestId,
+    attempt_id: attempt.attemptId,
+    attempt: attempt.attemptNumber,
+    job_id: job.id,
+  });
+
+  const guestId = data.guestId || request.guest_id;
+  const channel = data.channel || request.channel;
+  const template = data.template || request.template;
+  const basePayload = data.payload ?? request.payload ?? {};
+  const payload = typeof basePayload === 'object' && basePayload !== null ? basePayload : {};
+
   const guestResult = await query('SELECT id, phone, email, event_id FROM guests WHERE id = $1', [guestId]);
   if (guestResult.rowCount === 0) {
-    await updateDeliveryLog(deliveryLogId, 'failed', null, { error: 'guest_not_found' });
+    await failDeliveryAttempt({
+      requestId,
+      attemptId: attempt.attemptId,
+      errorInfo: { error: 'guest_not_found' },
+      willRetry: false,
+    });
     throw new Error('guest_not_found');
   }
 
   const guest = guestResult.rows[0];
   let providerRef = null;
-  let status = 'sent';
-  let errorInfo = null;
+  let finalStatus = 'sent';
 
   try {
     if (channel === 'whatsapp') {
       const result = await sendWhatsAppMessage({ guest, template, payload });
       providerRef = result.providerRef;
-      status = result.status || 'sent';
+      finalStatus = result.status || 'sent';
     } else {
       const result = await sendEmailMessage({ guest, template, payload });
       providerRef = result.providerRef;
-      status = result.status || 'sent';
+      finalStatus = result.status || 'sent';
     }
   } catch (error) {
-    logger({ level: 'error', message: 'delivery_channel_failed', channel, guest_id: guestId, error: error.message });
-    errorInfo = { channel, message: error.message };
+    logger({
+      level: 'error',
+      message: 'delivery_channel_failed',
+      channel,
+      guest_id: guestId,
+      request_id: requestId,
+      error: error.message,
+    });
+    const errorInfo = { channel, message: error.message };
     if (channel === 'whatsapp') {
-      // fallback to email
       try {
         const result = await sendEmailMessage({ guest, template, payload });
         providerRef = result.providerRef;
-        status = result.status || 'sent';
+        finalStatus = result.status || 'sent';
       } catch (fallbackError) {
-        errorInfo = { channel: 'email', message: fallbackError.message };
-        await updateDeliveryLog(deliveryLogId, 'failed', providerRef, errorInfo);
+        const willRetry = job.attemptsMade + 1 < Number(job.opts?.attempts || 1);
+        await failDeliveryAttempt({
+          requestId,
+          attemptId: attempt.attemptId,
+          errorInfo: { channel: 'email', message: fallbackError.message },
+          willRetry,
+        });
+        logRetrySchedule({
+          requestId,
+          attempt: attempt.attemptNumber,
+          willRetry,
+          backoff: job.opts?.backoff,
+          attemptsMade: job.attemptsMade + 1,
+        });
         throw fallbackError;
       }
     } else {
-      await updateDeliveryLog(deliveryLogId, 'failed', providerRef, errorInfo);
+      const willRetry = job.attemptsMade + 1 < Number(job.opts?.attempts || 1);
+      await failDeliveryAttempt({
+        requestId,
+        attemptId: attempt.attemptId,
+        errorInfo,
+        willRetry,
+      });
+      logRetrySchedule({
+        requestId,
+        attempt: attempt.attemptNumber,
+        willRetry,
+        backoff: job.opts?.backoff,
+        attemptsMade: job.attemptsMade + 1,
+      });
       throw error;
     }
   }
 
-  await updateDeliveryLog(deliveryLogId, status, providerRef, errorInfo);
+  try {
+    const completion = await completeDeliveryAttempt({
+      requestId,
+      attemptId: attempt.attemptId,
+      status: finalStatus,
+      providerRef,
+    });
+
+    logger({
+      level: 'info',
+      message: 'delivery_attempt_completed',
+      request_id: requestId,
+      attempt_id: attempt.attemptId,
+      attempt: attempt.attemptNumber,
+      status: completion.status,
+      provider_ref: providerRef,
+    });
+  } catch (error) {
+    const willRetry = job.attemptsMade + 1 < Number(job.opts?.attempts || 1);
+    await failDeliveryAttempt({
+      requestId,
+      attemptId: attempt.attemptId,
+      errorInfo: { channel, message: error.message },
+      willRetry,
+    });
+    logRetrySchedule({
+      requestId,
+      attempt: attempt.attemptNumber,
+      willRetry,
+      backoff: job.opts?.backoff,
+      attemptsMade: job.attemptsMade + 1,
+    });
+    throw error;
+  }
 }
 
 async function processWaWebhook(data) {
@@ -213,8 +318,24 @@ async function processWaWebhook(data) {
     if (deliveryStatus) {
       await query(
         `UPDATE delivery_logs
-         SET status = $1, provider_ref = COALESCE(provider_ref, $2), updated_at = now()
-         WHERE provider_ref = $2`,
+            SET status = $1,
+                completed_at = now()
+          WHERE provider_ref = $2`,
+        [deliveryStatus, providerRef],
+      );
+      await query(
+        `UPDATE delivery_requests
+            SET current_status = $1,
+                last_provider_ref = $2,
+                last_error = NULL,
+                updated_at = now()
+          WHERE id = (
+            SELECT request_id
+              FROM delivery_logs
+             WHERE provider_ref = $2
+             ORDER BY created_at DESC
+             LIMIT 1
+          )`,
         [deliveryStatus, providerRef],
       );
     }
@@ -245,10 +366,11 @@ async function sendWhatsAppMessage({ guest, template, payload }) {
     env.WA_360DIALOG_API_URL ||
     (apiBase ? `${apiBase}/v1/messages` : 'https://waba.360dialog.io/v1/messages');
 
-  if (!apiKey) {
+  if (!apiKey || apiKey.startsWith('local_')) {
+    const hintedRef = typeof payload?.providerRef === 'string' ? payload.providerRef : null;
     whatsappBreaker.success();
     logger({ level: 'warn', message: 'wa_send_simulated', guest_id: guest.id, simulated: true });
-    return { providerRef: `wa-sim-${randomUUID()}`, status: 'sent' };
+    return { providerRef: hintedRef || `wa-sim-${randomUUID()}`, status: 'sent' };
   }
 
   const body = {
@@ -294,10 +416,11 @@ async function sendEmailMessage({ guest, template, payload }) {
   const apiKey = env.RESEND_API_KEY;
   const apiUrl = env.RESEND_API_URL || 'https://api.resend.com/emails';
 
-  if (!apiKey) {
+  if (!apiKey || apiKey.startsWith('local_')) {
+    const hintedRef = typeof payload?.providerRef === 'string' ? payload.providerRef : null;
     emailBreaker.success();
     logger({ level: 'warn', message: 'email_send_simulated', guest_id: guest.id });
-    return { providerRef: `email-sim-${randomUUID()}`, status: 'sent' };
+    return { providerRef: hintedRef || `email-sim-${randomUUID()}`, status: 'sent' };
   }
 
   const body = {
@@ -327,17 +450,152 @@ async function sendEmailMessage({ guest, template, payload }) {
   return { providerRef: payloadResponse.id || `email-${randomUUID()}`, status: 'sent' };
 }
 
-async function updateDeliveryLog(deliveryLogId, status, providerRef, errorInfo) {
-  if (!deliveryLogId) return;
-  await query(
-    `UPDATE delivery_logs
-     SET status = $1,
-         provider_ref = COALESCE($2, provider_ref),
-         error = $3::jsonb,
-         updated_at = now()
-     WHERE id = $4`,
-    [status, providerRef, errorInfo ? JSON.stringify(errorInfo) : null, deliveryLogId],
+async function beginDeliveryAttempt({ requestId, metadata }) {
+  const requestUpdate = await query(
+    `
+      UPDATE delivery_requests
+         SET attempt_count = attempt_count + 1,
+             current_status = 'processing',
+             updated_at = now()
+       WHERE id = $1
+       RETURNING attempt_count
+    `,
+    [requestId],
   );
+  if (requestUpdate.rowCount === 0) {
+    return null;
+  }
+  const attemptNumber = requestUpdate.rows[0].attempt_count;
+  const result = await query(
+    `
+      INSERT INTO delivery_logs (
+        request_id,
+        attempt,
+        status,
+        metadata,
+        queued_at,
+        started_at,
+        created_at
+      )
+      VALUES ($1, $2, 'processing', $3::jsonb, now(), now(), now())
+      RETURNING id
+    `,
+    [requestId, attemptNumber, metadata ? JSON.stringify(metadata) : null],
+  );
+  return { attemptId: result.rows[0].id, attemptNumber };
+}
+
+async function completeDeliveryAttempt({ requestId, attemptId, status, providerRef }) {
+  await query(
+    `
+      UPDATE delivery_logs
+         SET status = $1,
+             provider_ref = COALESCE($2, provider_ref),
+             error = NULL,
+             completed_at = now()
+       WHERE id = $3
+    `,
+    [status, providerRef, attemptId],
+  );
+
+  if (providerRef) {
+    try {
+      await query(
+        `
+          INSERT INTO delivery_provider_refs (provider_ref, request_id, attempt_id)
+          VALUES ($1, $2, $3)
+        `,
+        [providerRef, requestId, attemptId],
+      );
+    } catch (error) {
+      if (error?.code === '23505') {
+        await query(
+          `
+            UPDATE delivery_logs
+               SET status = 'duplicate',
+                   error = jsonb_build_object('duplicate', true)
+             WHERE id = $1
+          `,
+          [attemptId],
+        );
+        await query(
+          `
+            UPDATE delivery_requests
+               SET current_status = 'duplicate',
+                   last_provider_ref = $1,
+                   last_error = NULL,
+                   updated_at = now()
+             WHERE id = $2
+          `,
+          [providerRef, requestId],
+        );
+        return { status: 'duplicate' };
+      }
+      throw error;
+    }
+  }
+
+  await query(
+    `
+      UPDATE delivery_requests
+         SET current_status = $1,
+             last_provider_ref = COALESCE($2, last_provider_ref),
+             last_error = NULL,
+             updated_at = now()
+       WHERE id = $3
+    `,
+    [status, providerRef, requestId],
+  );
+
+  return { status };
+}
+
+async function failDeliveryAttempt({ requestId, attemptId, errorInfo, willRetry }) {
+  await query(
+    `
+      UPDATE delivery_logs
+         SET status = 'failed',
+             error = $1::jsonb,
+             completed_at = now()
+       WHERE id = $2
+    `,
+    [JSON.stringify(errorInfo), attemptId],
+  );
+  await query(
+    `
+      UPDATE delivery_requests
+         SET current_status = $1,
+             last_error = $2::jsonb,
+             updated_at = now()
+       WHERE id = $3
+    `,
+    [willRetry ? 'retrying' : 'failed', JSON.stringify(errorInfo), requestId],
+  );
+}
+
+function logRetrySchedule({ requestId, attempt, willRetry, backoff, attemptsMade }) {
+  if (!willRetry) {
+    return;
+  }
+  const delayMs = calculateBackoffDelay(backoff, attemptsMade);
+  logger({
+    level: 'warn',
+    message: 'delivery_retry_scheduled',
+    request_id: requestId,
+    attempt,
+    next_delay_ms: delayMs,
+  });
+}
+
+function calculateBackoffDelay(backoff, attempt) {
+  if (!backoff) return 0;
+  if (typeof backoff === 'number') return backoff * attempt;
+  const type = (backoff.type || 'exponential').toLowerCase();
+  const delay = Number(backoff.delay || 1000);
+  if (type === 'fixed') {
+    return delay;
+  }
+  return delay * 2 ** Math.max(0, attempt - 1);
 }
 
 function extractWhatsappContact(payload) {

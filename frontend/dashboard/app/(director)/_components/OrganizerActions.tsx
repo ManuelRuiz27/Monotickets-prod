@@ -7,8 +7,8 @@ import {
   recordPayment,
   updatePricing,
   GrantPayload,
-} from '../../../lib/api/director';
-import { colors, typography, spacing, inputStyles, buttonStyles } from '../../../shared/theme';
+} from '@/lib/api/director';
+import { colors, typography, spacing, inputStyles, buttonStyles } from '@shared/theme';
 
 const inputStyle = parseStyles(inputStyles);
 const primaryButton = parseStyles(buttonStyles.primary);

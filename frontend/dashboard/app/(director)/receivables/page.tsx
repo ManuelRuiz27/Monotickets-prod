@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import { getReceivables, ReceivableRecord } from '../../../lib/api/director';
-import { colors, spacing, typography, cardStyles } from '../../../shared/theme';
+import { getReceivables, ReceivableRecord } from '@/lib/api/director';
+import { colors, spacing, typography, cardStyles } from '@shared/theme';
 
 const cardStyle = parseStyles(cardStyles);
 
