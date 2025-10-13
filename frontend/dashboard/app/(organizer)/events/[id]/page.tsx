@@ -13,9 +13,10 @@ import {
   EventDetail,
   ConfirmationState,
 } from '@/lib/api/organizer';
-import { colors, spacing, typography, cardStyles, buttonStyles, inputStyles } from '@shared/theme';
+import { colors, spacing, typography, cardStyles, buttonStyles, inputStyles, parseStyles } from '@shared/theme';
 import { Tabs, TabTrigger, TabPanel } from '@/lib/ui/tabs';
 import { StageMetrics } from './_components/StageMetrics';
+import { Stats } from './_components/Stats';
 
 const cardStyle = parseStyles(cardStyles);
 const secondaryButton = parseStyles(buttonStyles.secondary);
@@ -38,6 +39,7 @@ export default function EventDashboardPage({ params }: PageProps) {
   const [loading, setLoading] = React.useState(true);
   const [sending, setSending] = React.useState<string | null>(null);
   const [bulkMessage, setBulkMessage] = React.useState<string | null>(null);
+  const [metricsLoading, setMetricsLoading] = React.useState(false);
 
   const loadEvent = React.useCallback(async () => {
     try {
@@ -64,6 +66,31 @@ export default function EventDashboardPage({ params }: PageProps) {
       cancelled = true;
     };
   }, [loadEvent]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const interval = window.setInterval(async () => {
+      try {
+        setMetricsLoading(true);
+        const updated = await getEvent(id);
+        if (!cancelled) {
+          setEvent((current) => (current ? { ...current, ...updated } : updated));
+        }
+      } catch (err) {
+        if (!cancelled && process.env.NODE_ENV !== 'production') {
+          console.warn('[event-dashboard] no se pudieron actualizar las métricas', err);
+        }
+      } finally {
+        if (!cancelled) {
+          setMetricsLoading(false);
+        }
+      }
+    }, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [id]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -179,6 +206,9 @@ export default function EventDashboardPage({ params }: PageProps) {
               Ver landing pública
             </Link>
           </header>
+          <div style={{ marginBottom: spacing.lg }}>
+            <Stats metrics={event.metrics} loading={metricsLoading && Boolean(event.metrics)} />
+          </div>
           <Tabs defaultValue="preview" aria-label="Tabs del evento">
             <TabTrigger value="preview">Previo</TabTrigger>
             <TabTrigger value="live">Durante</TabTrigger>
@@ -435,11 +465,3 @@ function formatPhone(phone: string) {
   return phone;
 }
 
-function parseStyles(inline: string): React.CSSProperties {
-  return inline.split(';').reduce<React.CSSProperties>((acc, declaration) => {
-    const [property, rawValue] = declaration.split(':').map((part) => part.trim());
-    if (!property || !rawValue) return acc;
-    const camelCaseProperty = property.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-    return { ...acc, [camelCaseProperty]: rawValue };
-  }, {});
-}

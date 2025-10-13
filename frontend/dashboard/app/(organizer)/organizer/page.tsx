@@ -4,11 +4,19 @@ import React from 'react';
 import Link from 'next/link';
 import {
   getEvents,
-  EventSummary,
-  EventStatus,
-  LandingKind,
+  type EventSummary,
+  type EventStatus,
+  type LandingKind,
 } from '@/lib/api/organizer';
-import { colors, typography, spacing, cardStyles, buttonStyles } from '@shared/theme';
+import {
+  colors,
+  typography,
+  spacing,
+  cardStyles,
+  buttonStyles,
+  parseStyles,
+} from '@shared/theme';
+import { Filters, type OrganizerFilters } from './_components/Filters';
 
 const cardStyle = parseStyles(cardStyles);
 const primaryButton = parseStyles(buttonStyles.primary);
@@ -25,101 +33,132 @@ const kindLabels: Record<LandingKind, string> = {
   premium: 'Premium',
 };
 
+const INITIAL_FILTERS: OrganizerFilters = {
+  search: '',
+  type: 'all',
+  status: 'all',
+  from: undefined,
+  to: undefined,
+};
+
 export default function OrganizerDashboardPage() {
   const [events, setEvents] = React.useState<EventSummary[]>([]);
+  const [filters, setFilters] = React.useState<OrganizerFilters>(INITIAL_FILTERS);
   const [page, setPage] = React.useState(1);
-  const [status, setStatus] = React.useState<EventStatus | 'all'>('all');
-  const [error, setError] = React.useState<string | null>(null);
+  const [total, setTotal] = React.useState(0);
+  const [pageSize, setPageSize] = React.useState(6);
   const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    const selectedStatus = status === 'all' ? undefined : status;
-    getEvents(page, selectedStatus)
-      .then((response) => {
+    (async () => {
+      try {
+        const response = await getEvents({
+          page,
+          search: filters.search || undefined,
+          status: filters.status === 'all' ? undefined : filters.status,
+          type: filters.type === 'all' ? undefined : filters.type,
+          startsAt: filters.from,
+          endsAt: filters.to,
+        });
         if (cancelled) return;
         setEvents(response.data);
+        setTotal(response.total);
+        setPageSize(response.pageSize || 6);
         setError(null);
-      })
-      .catch((err) => {
+      } catch (err) {
         if (cancelled) return;
-        setError(err.message);
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setLoading(false);
-      });
+        const message = err instanceof Error ? err.message : 'No pudimos cargar los eventos.';
+        setError(message);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [page, status]);
+  }, [filters, page]);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const showEmpty = !loading && events.length === 0;
 
   return (
     <main aria-labelledby="organizer-dashboard-title" style={{ padding: spacing.xl }}>
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.md }}>
+      <header style={headerStyle}>
         <div>
           <h1 id="organizer-dashboard-title" style={titleStyle}>
             Panel del organizador
           </h1>
           <p style={subtitleStyle}>
-            Revisa el estado de tus eventos, crea nuevos y gestiona la confirmación de tus invitados.
+            Revisa el estado de tus eventos, filtra por periodo y administra invitaciones desde un solo lugar.
           </p>
         </div>
         <Link href="/dashboard/events/new" style={{ ...primaryButton, textDecoration: 'none' }}>
           Nuevo evento
         </Link>
       </header>
-      <section
-        aria-label="Filtros de eventos"
-        style={{
-          display: 'flex',
-          gap: spacing.md,
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          marginBottom: spacing.lg,
-        }}
-      >
-        <label htmlFor="event-status-filter" style={filterLabelStyle}>
-          Estado
-          <select
-            id="event-status-filter"
-            style={selectStyle}
-            value={status}
-            onChange={(event) => {
-              setStatus(event.target.value as EventStatus | 'all');
-              setPage(1);
-            }}
-          >
-            <option value="all">Todos</option>
-            <option value="draft">Borradores</option>
-            <option value="live">Previo / en vivo</option>
-            <option value="completed">Finalizados</option>
-          </select>
-        </label>
+
+      <section aria-label="Filtros de eventos" style={{ marginBottom: spacing.lg }}>
+        <Filters
+          value={filters}
+          onChange={(nextFilters) => {
+            setFilters(nextFilters);
+            setPage(1);
+          }}
+          onReset={() => {
+            setFilters(INITIAL_FILTERS);
+            setPage(1);
+          }}
+        />
       </section>
+
       {error && (
-        <div role="alert" style={{ ...alertStyle }}>
+        <div role="alert" aria-live="assertive" style={alertStyle}>
           <p style={{ margin: 0 }}>{error}</p>
-          <button type="button" onClick={() => setStatus((current) => current)} style={retryButtonStyle}>
+          <button
+            type="button"
+            onClick={() => setFilters((current) => ({ ...current }))}
+            style={retryButtonStyle}
+          >
             Reintentar
           </button>
         </div>
       )}
-      {loading ? (
-        <p role="status" style={subtitleStyle}>
-          Cargando eventos…
-        </p>
-      ) : (
-        <section aria-live="polite">
-          {events.length === 0 ? (
-            <div style={emptyStateStyle}>
-              <p style={subtitleStyle}>No hay eventos para el filtro seleccionado.</p>
-              <Link href="/dashboard/events/new" style={{ ...primaryButton, textDecoration: 'none' }}>
-                Crear un evento
-              </Link>
-            </div>
-          ) : (
+
+      <section aria-live="polite" aria-busy={loading}>
+        {loading && (
+          <div style={gridStyle}>
+            {Array.from({ length: 3 }).map((_, index) => (
+              <article key={`skeleton-${index}`} style={{ ...cardStyle, minHeight: '200px' }} aria-hidden="true">
+                <div style={skeletonTitleStyle} />
+                <div style={skeletonLineStyle} />
+                <div style={skeletonLineStyle} />
+                <div style={{ ...skeletonLineStyle, width: '60%' }} />
+              </article>
+            ))}
+          </div>
+        )}
+
+        {showEmpty && (
+          <div style={emptyStateStyle}>
+            <p style={subtitleStyle}>No hay eventos que coincidan con los filtros seleccionados.</p>
+            <Link href="/dashboard/events/new" style={{ ...primaryButton, textDecoration: 'none' }}>
+              Crear un evento
+            </Link>
+          </div>
+        )}
+
+        {!loading && !showEmpty && (
+          <>
+            <p style={resultsSummary}>
+              {total === events.length
+                ? `${events.length} eventos encontrados`
+                : `${events.length} de ${total} eventos mostrados`}
+            </p>
             <div style={gridStyle}>
               {events.map((event) => (
                 <article key={event.id} style={cardStyle} aria-labelledby={`event-${event.id}-title`}>
@@ -127,13 +166,14 @@ export default function OrganizerDashboardPage() {
                     {event.name}
                   </h2>
                   <p style={cardMetaStyle}>
-                    {new Date(event.startsAt).toLocaleString()} {event.endsAt && `— ${new Date(event.endsAt).toLocaleString()}`}
+                    {new Date(event.startsAt).toLocaleString()}
+                    {event.endsAt && ` — ${new Date(event.endsAt).toLocaleString()}`}
                   </p>
                   <p style={cardMetaStyle}>
                     Tipo: {kindLabels[event.type]} · Landing: {kindLabels[event.landingKind]}
                   </p>
                   <p style={cardMetaStyle}>Estado: {statusLabels[event.status]}</p>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: spacing.sm, marginTop: spacing.md }}>
+                  <div style={cardActionsStyle}>
                     <Link href={`/dashboard/events/${event.id}`} style={{ ...secondaryButton, textDecoration: 'none' }}>
                       Ver
                     </Link>
@@ -147,21 +187,43 @@ export default function OrganizerDashboardPage() {
                 </article>
               ))}
             </div>
-          )}
-        </section>
-      )}
-      <nav aria-label="Paginación de eventos" style={{ marginTop: spacing.lg, display: 'flex', gap: spacing.sm }}>
-        <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}>
+          </>
+        )}
+      </section>
+
+      <nav aria-label="Paginación de eventos" style={paginationStyle}>
+        <button
+          type="button"
+          onClick={() => setPage((current) => Math.max(1, current - 1))}
+          disabled={page === 1}
+          style={{ ...secondaryButton, minWidth: '160px' }}
+        >
           Página anterior
         </button>
-        <span style={{ alignSelf: 'center', fontFamily: typography.body }}>Página {page}</span>
-        <button type="button" onClick={() => setPage((p) => p + 1)}>
+        <span style={{ alignSelf: 'center', fontFamily: typography.body }}>
+          Página {page} de {totalPages}
+        </span>
+        <button
+          type="button"
+          onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+          disabled={page >= totalPages}
+          style={{ ...secondaryButton, minWidth: '160px' }}
+        >
           Página siguiente
         </button>
       </nav>
     </main>
   );
 }
+
+const headerStyle: React.CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  flexWrap: 'wrap',
+  gap: spacing.md,
+  marginBottom: spacing.lg,
+};
 
 const titleStyle: React.CSSProperties = {
   fontFamily: typography.title,
@@ -172,7 +234,7 @@ const titleStyle: React.CSSProperties = {
 
 const subtitleStyle: React.CSSProperties = {
   fontFamily: typography.body,
-  color: colors.navy,
+  color: colors.lightGray,
   margin: 0,
 };
 
@@ -195,18 +257,25 @@ const cardMetaStyle: React.CSSProperties = {
   marginBottom: spacing.xs,
 };
 
-const filterLabelStyle: React.CSSProperties = {
-  display: 'grid',
-  gap: spacing.xs,
-  fontFamily: typography.body,
-  color: colors.navy,
+const cardActionsStyle: React.CSSProperties = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  gap: spacing.sm,
+  marginTop: spacing.md,
 };
 
-const selectStyle: React.CSSProperties = {
-  padding: `${spacing.xs} ${spacing.sm}`,
-  borderRadius: '8px',
-  border: `1px solid ${colors.lightGray}`,
+const resultsSummary: React.CSSProperties = {
   fontFamily: typography.body,
+  color: colors.lightGray,
+  marginBottom: spacing.sm,
+};
+
+const paginationStyle: React.CSSProperties = {
+  marginTop: spacing.lg,
+  display: 'flex',
+  gap: spacing.sm,
+  justifyContent: 'center',
+  flexWrap: 'wrap',
 };
 
 const alertStyle: React.CSSProperties = {
@@ -226,6 +295,7 @@ const retryButtonStyle: React.CSSProperties = {
   background: 'transparent',
   border: 'none',
   cursor: 'pointer',
+  padding: 0,
 };
 
 const emptyStateStyle: React.CSSProperties = {
@@ -235,14 +305,21 @@ const emptyStateStyle: React.CSSProperties = {
   justifyItems: 'center',
   padding: spacing.xl,
   borderRadius: '16px',
-  background: 'rgba(13,27,42,0.05)',
+  background: 'rgba(13, 27, 42, 0.05)',
+  textAlign: 'center',
 };
 
-function parseStyles(inline: string): React.CSSProperties {
-  return inline.split(';').reduce<React.CSSProperties>((acc, declaration) => {
-    const [property, rawValue] = declaration.split(':').map((part) => part.trim());
-    if (!property || !rawValue) return acc;
-    const camelCaseProperty = property.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-    return { ...acc, [camelCaseProperty]: rawValue };
-  }, {});
-}
+const skeletonTitleStyle: React.CSSProperties = {
+  height: '28px',
+  width: '75%',
+  borderRadius: '8px',
+  background: 'linear-gradient(90deg, rgba(176,176,176,0.25), rgba(176,176,176,0.45), rgba(176,176,176,0.25))',
+};
+
+const skeletonLineStyle: React.CSSProperties = {
+  height: '16px',
+  width: '85%',
+  borderRadius: '8px',
+  background: 'linear-gradient(90deg, rgba(224,224,224,0.4), rgba(176,176,176,0.45), rgba(224,224,224,0.4))',
+  marginTop: spacing.sm,
+};
