@@ -33,8 +33,7 @@ services:
 
   pwa:
     <<: *backend-dependency
-    build:
-      context: ./frontend/pwa
+    image: node:20
     command: ["./node_modules/.bin/next", "dev", "-p", "3000"]
     working_dir: /app
     environment:
@@ -51,8 +50,7 @@ services:
 
   dashboard:
     <<: *backend-dependency
-    build:
-      context: ./frontend/dashboard
+    image: node:20
     command: ["./node_modules/.bin/next", "dev", "-p", "3001"]
     working_dir: /app
     environment:
@@ -71,8 +69,7 @@ services:
 
   pwa-prod:
     <<: *backend-dependency
-    build:
-      context: ./frontend/pwa
+    image: node:20
     command: ["./node_modules/.bin/next", "start", "-p", "3000"]
     working_dir: /app
     environment:
@@ -94,8 +91,7 @@ services:
 
   dashboard-prod:
     <<: *backend-dependency
-    build:
-      context: ./frontend/dashboard
+    image: node:20
     command: ["./node_modules/.bin/next", "start", "-p", "3001"]
     working_dir: /app
     environment:
