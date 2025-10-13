@@ -30,12 +30,22 @@ export interface EventDetail extends EventSummary {
 
 export type ConfirmationState = GuestStatus;
 
+export interface WhatsappBreakdown {
+  freeSessions: number;
+  paidTemplates: number;
+  ratio: number;
+}
+
 export interface ConfirmationMetrics {
   confirmationRate: number;
+  showUpRate: number;
   averageConfirmationTimeMinutes: number;
   confirmedGuests: number;
   scannedGuests: number;
   pendingGuests: number;
+  totalGuests: number;
+  whatsapp: WhatsappBreakdown;
+  lastUpdatedAt: string;
 }
 
 export interface PaginatedResponse<T> {
@@ -166,6 +176,12 @@ const MOCK_GUESTS: Record<string, Guest[]> = {
   'evt-after-2023': [],
 };
 
+const MOCK_WHATSAPP_USAGE: Record<string, { freeSessions: number; paidTemplates: number }> = {
+  'evt-gala-2024': { freeSessions: 72, paidTemplates: 28 },
+  'evt-summit-pre': { freeSessions: 15, paidTemplates: 4 },
+  'evt-after-2023': { freeSessions: 20, paidTemplates: 5 },
+};
+
 async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   if (USE_MOCK) {
     return mockRequest<T>(input, init);
@@ -204,8 +220,23 @@ function mockRequest<T>(input: RequestInfo | URL, init?: RequestInit): T {
   if (pathname === '/events') {
     const page = Number(searchParams.get('page') ?? '1');
     const status = searchParams.get('status') as EventStatus | null;
-    const filtered = status ? MOCK_EVENTS.filter((event) => event.status === status) : MOCK_EVENTS;
-    const pageSize = 6;
+    const type = searchParams.get('type') as LandingKind | null;
+    const search = (searchParams.get('search') ?? '').toLowerCase();
+    const startsAt = searchParams.get('startsAt');
+    const endsAt = searchParams.get('endsAt');
+    const filtered = MOCK_EVENTS.filter((event) => {
+      if (status && event.status !== status) return false;
+      if (type && event.type !== type) return false;
+      if (search) {
+        const haystack = `${event.name} ${event.description ?? ''} ${event.location ?? ''}`.toLowerCase();
+        if (!haystack.includes(search)) return false;
+      }
+      if (startsAt && new Date(event.startsAt) < new Date(startsAt)) return false;
+      if (endsAt && event.endsAt && new Date(event.endsAt) > new Date(endsAt + 'T23:59:59')) return false;
+      if (endsAt && !event.endsAt && new Date(event.startsAt) > new Date(endsAt + 'T23:59:59')) return false;
+      return true;
+    });
+    const pageSize = Number(searchParams.get('pageSize') ?? '6');
     const data = filtered.slice((page - 1) * pageSize, page * pageSize);
     return clone({ data, total: filtered.length, page, pageSize }) as T;
   }
@@ -310,10 +341,28 @@ function mockRequest<T>(input: RequestInfo | URL, init?: RequestInit): T {
   throw new Error(`Mock organizer API: ruta no soportada (${pathname})`);
 }
 
-export function getEvents(page = 1, status?: EventStatus) {
-  const search = new URLSearchParams({ page: String(page) });
-  if (status) search.set('status', status);
-  return request<PaginatedResponse<EventSummary>>(`/events?${search.toString()}`);
+export interface EventListFilters {
+  page?: number;
+  pageSize?: number;
+  status?: EventStatus;
+  type?: LandingKind;
+  search?: string;
+  startsAt?: string;
+  endsAt?: string;
+}
+
+export function getEvents(filters: EventListFilters = {}) {
+  const search = new URLSearchParams();
+  if (filters.page) search.set('page', String(filters.page));
+  if (filters.pageSize) search.set('pageSize', String(filters.pageSize));
+  if (filters.status) search.set('status', filters.status);
+  if (filters.type) search.set('type', filters.type);
+  if (filters.search) search.set('search', filters.search);
+  if (filters.startsAt) search.set('startsAt', filters.startsAt);
+  if (filters.endsAt) search.set('endsAt', filters.endsAt);
+  const query = search.toString();
+  const suffix = query ? `?${query}` : '';
+  return request<PaginatedResponse<EventSummary>>(`/events${suffix}`);
 }
 
 export function getEvent(id: string) {
@@ -390,15 +439,33 @@ function computeMetrics(eventId: string): ConfirmationMetrics {
   const confirmed = guests.filter((guest) => guest.status === 'confirmed').length;
   const scanned = guests.filter((guest) => guest.status === 'scanned').length;
   const pending = guests.filter((guest) => guest.status === 'pending').length;
-  const total = confirmed + scanned + pending || 1;
+  const totalGuests = guests.length;
+  const responded = confirmed + scanned;
+  const confirmationRate = totalGuests
+    ? Number(((responded / totalGuests) * 100).toFixed(1))
+    : 0;
+  const showUpRate = responded
+    ? Number(((scanned / responded) * 100).toFixed(1))
+    : 0;
+  const usage = MOCK_WHATSAPP_USAGE[eventId] ?? {
+    freeSessions: Math.round(responded * 0.6),
+    paidTemplates: Math.round(responded * 0.4),
+  };
+  const ratioBase = usage.paidTemplates > 0 ? usage.freeSessions / usage.paidTemplates : usage.freeSessions;
   return {
-    confirmationRate: Number(((confirmed + scanned) / total * 100).toFixed(1)),
-    averageConfirmationTimeMinutes: confirmed
-      ? 180
-      : 0,
+    confirmationRate,
+    showUpRate,
+    averageConfirmationTimeMinutes: responded ? 180 : 0,
     confirmedGuests: confirmed,
     scannedGuests: scanned,
     pendingGuests: pending,
+    totalGuests,
+    whatsapp: {
+      freeSessions: usage.freeSessions,
+      paidTemplates: usage.paidTemplates,
+      ratio: Number(ratioBase.toFixed(2)),
+    },
+    lastUpdatedAt: new Date().toISOString(),
   };
 }
 

@@ -13,7 +13,7 @@ import {
 import { StepCover, CoverData } from './_components/StepCover';
 import { StepGuests, GuestDraft } from './_components/StepGuests';
 import { StepWhatsApp } from './_components/StepWhatsApp';
-import { colors, spacing, typography, cardStyles, buttonStyles } from '@shared/theme';
+import { colors, spacing, typography, cardStyles, buttonStyles, parseStyles } from '@shared/theme';
 
 const steps = ['Portada y landing', 'Invitados', 'WhatsApp'] as const;
 
@@ -249,12 +249,3 @@ const stepNumberStyle: React.CSSProperties = {
   placeItems: 'center',
   fontSize: '0.9rem',
 };
-
-function parseStyles(inline: string): React.CSSProperties {
-  return inline.split(';').reduce<React.CSSProperties>((acc, declaration) => {
-    const [property, rawValue] = declaration.split(':').map((part) => part.trim());
-    if (!property || !rawValue) return acc;
-    const camelCaseProperty = property.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-    return { ...acc, [camelCaseProperty]: rawValue };
-  }, {});
-}
