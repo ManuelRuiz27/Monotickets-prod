@@ -1,5 +1,7 @@
 services:
   auth:
+    image: node:20
+    working_dir: /app
     command: npm run dev
     environment:
       NODE_ENV: development
@@ -10,6 +12,8 @@ services:
     ports:
       - "3001:3000"
   events:
+    image: node:20
+    working_dir: /app
     command: npm run dev
     environment:
       NODE_ENV: development
@@ -20,6 +24,8 @@ services:
     ports:
       - "3002:3000"
   guests:
+    image: node:20
+    working_dir: /app
     command: npm run dev
     environment:
       NODE_ENV: development
