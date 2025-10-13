@@ -94,6 +94,21 @@ export class SimpleQueue {
     const client = await ensureRedis({ ...this.connectionOptions, name: `${this.name}-metrics` });
     return client.zcard(toKey(this.name, 'active'));
   }
+
+  async countCompleted() {
+    const client = await ensureRedis({ ...this.connectionOptions, name: `${this.name}-metrics` });
+    return client.llen(toKey(this.name, 'completed'));
+  }
+
+  async countFailed() {
+    const client = await ensureRedis({ ...this.connectionOptions, name: `${this.name}-metrics` });
+    return client.llen(toKey(this.name, 'failed'));
+  }
+
+  async countDeadLetter() {
+    const client = await ensureRedis({ ...this.connectionOptions, name: `${this.name}-metrics` });
+    return client.llen(toKey(this.name, 'dlq'));
+  }
 }
 
 export class SimpleQueueEvents extends EventEmitter {

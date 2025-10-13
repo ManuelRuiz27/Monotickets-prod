@@ -16,6 +16,7 @@ import { createQueues } from './queues/index.js';
 import { createDeliveryModule } from './modules/delivery.js';
 import { createDirectorModule } from './modules/director.js';
 import { createPaymentsModule } from './modules/payments.js';
+import { createErrorInterceptor } from './http/error-interceptor.js';
 import { query } from './db/index.js';
 import { ensureRedis } from './redis/client.js';
 import { hitRateLimit } from './lib/rate-limit.js';
@@ -95,7 +96,10 @@ export function createServer(options = {}) {
   const deliveryModule = createDeliveryModule({ env, logger, queuesPromise });
   const directorModule = createDirectorModule({ env, logger });
   const paymentsModule = createPaymentsModule({ env, logger, queuesPromise });
-  const middlewares = [createJwtAuthMiddleware({ env, logger })];
+  const middlewares = [
+    createErrorInterceptor({ env, logger }),
+    createJwtAuthMiddleware({ env, logger }),
+  ];
 
   attachQueueObservers(queuesPromise, logger, env);
 
@@ -434,8 +438,32 @@ export function createServer(options = {}) {
           return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
         }
 
+        const directorBody = await readJsonBody(req, logger);
+        const { statusCode, payload } = await directorModule.recordPayment({ body: directorBody, requestId });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'POST' && url.pathname === '/director/webhook') {
+        if (!requireAction({
+          auth,
+          action: RBAC.ACTIONS.DIRECTOR_WEBHOOK,
+          res,
+          requestId,
+          logger,
+          path: url.pathname,
+        })) {
+          return;
+        }
+
         const body = await readJsonBody(req, logger);
-        const { statusCode, payload } = await directorModule.recordPayment({ body, requestId });
+        const headers = Object.fromEntries(Object.entries(req.headers || {}));
+        const rawBody = typeof req.rawBody === 'string' ? req.rawBody : JSON.stringify(body || {});
+        const { statusCode, payload } = await directorModule.handleWebhook({
+          body,
+          headers,
+          rawBody,
+          requestId,
+        });
         return sendJson(res, statusCode, { ...payload, requestId });
       }
 
@@ -735,18 +763,23 @@ export function createServer(options = {}) {
 
       sendJson(res, 404, { error: 'not_found' });
     } catch (error) {
-      sendJson(res, 500, { error: 'internal_error' });
-      log(
-        {
-          level: 'error',
-          message: 'request_failed',
-          error: error.message,
-          request_id: requestId,
-          path: url.pathname,
-          event_id: requestContext.eventId,
-        },
-        { logger },
-      );
+      const handleError = middlewareContext.handleError;
+      if (typeof handleError === 'function') {
+        handleError(error, { statusCode: 500, code: 'internal_error' });
+      } else {
+        sendJson(res, 500, { error: 'internal_error' });
+        log(
+          {
+            level: 'error',
+            message: 'request_failed',
+            error: error.message,
+            request_id: requestId,
+            path: url.pathname,
+            event_id: requestContext.eventId,
+          },
+          { logger },
+        );
+      }
     } finally {
       const finishedAt = process.hrtime.bigint();
       const latencyMs = Number(finishedAt - startedAt) / 1_000_000;
@@ -781,7 +814,10 @@ function attachQueueObservers(queuesPromise, logger, env) {
   queuesPromise
     .then((queues) => {
       const watchers = [
-        { name: 'delivery', events: queues.deliveryEvents, queue: queues.deliveryQueue },
+        { name: 'whatsapp', events: queues.whatsappEvents, queue: queues.whatsappQueue },
+        { name: 'email', events: queues.emailEvents, queue: queues.emailQueue },
+        { name: 'pdf', events: queues.pdfEvents, queue: queues.pdfQueue },
+        { name: 'deliveryFailed', events: queues.deliveryFailedEvents, queue: queues.deliveryFailedQueue },
         { name: 'waInbound', events: queues.waInboundEvents, queue: queues.waInboundQueue },
         { name: 'payments', events: queues.paymentsEvents, queue: queues.paymentsQueue },
       ];
@@ -933,6 +969,7 @@ async function readJsonBody(req, logger = defaultLogger) {
   }
   const raw = await readBody(req);
   if (!raw) return {};
+  req.rawBody = raw;
   try {
     return JSON.parse(raw);
   } catch (error) {

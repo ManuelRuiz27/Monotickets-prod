@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 
 import { query } from '../db/index.js';
 import { ensureRedis } from '../redis/client.js';
+import { normalizeDeliveryPayload } from './delivery-templates.js';
 
 const DEFAULT_CHANNEL = 'whatsapp';
-const SUPPORTED_CHANNELS = new Set(['whatsapp', 'email']);
+const SUPPORTED_CHANNELS = new Set(['whatsapp', 'email', 'pdf']);
 const DEFAULT_TEMPLATE = 'event_invitation';
 const DEFAULT_ORGANIZER = '00000000-0000-0000-0000-000000000000';
 const DEFAULT_DEDUPE_WINDOW_MINUTES = 1440;
@@ -142,6 +143,7 @@ export function createDeliveryModule(options = {}) {
     }
 
     const sanitizedMetadata = sanitizeMetadata(metadata);
+    const normalizedPayload = normalizeDeliveryPayload(payload);
 
     const request = await createDeliveryRequest({
       organizerId,
@@ -149,13 +151,13 @@ export function createDeliveryModule(options = {}) {
       guestId,
       channel,
       template,
-      payload,
+      payload: normalizedPayload,
       metadata: sanitizedMetadata,
       dedupeKey,
     });
 
     const queues = await queuesPromise;
-    const outboundQueue = queues.waOutboundQueue || queues.deliveryQueue;
+    const outboundQueue = selectQueueForChannel({ queues, channel });
     const jobPayload = {
       requestId: request.id,
       eventId,
@@ -163,13 +165,13 @@ export function createDeliveryModule(options = {}) {
       organizerId,
       channel,
       template,
-      payload,
+      payload: normalizedPayload,
       metadata: sanitizedMetadata,
       requestIdHeader: requestId,
     };
 
     const jobOptions = {
-      attempts: Number(env.DELIVERY_MAX_RETRIES || 5),
+      attempts: Number(env.DELIVERY_MAX_RETRIES || 3),
       backoff: { type: 'exponential', delay: Number(env.QUEUE_BACKOFF_DELAY_MS || 5000) },
       removeOnComplete: true,
       removeOnFail: false,
@@ -364,6 +366,28 @@ function selectChannel(channel) {
     return channel;
   }
   return DEFAULT_CHANNEL;
+}
+
+function selectQueueForChannel({ queues, channel }) {
+  if (!queues) {
+    throw new Error('queues_not_initialized');
+  }
+  if (channel === 'email' && queues.emailQueue) {
+    return queues.emailQueue;
+  }
+  if (channel === 'pdf' && queues.pdfQueue) {
+    return queues.pdfQueue;
+  }
+  if (queues.whatsappQueue) {
+    return queues.whatsappQueue;
+  }
+  if (queues.waOutboundQueue) {
+    return queues.waOutboundQueue;
+  }
+  if (queues.deliveryQueue) {
+    return queues.deliveryQueue;
+  }
+  throw new Error('delivery_queue_missing');
 }
 
 function collectGuestIds(body) {

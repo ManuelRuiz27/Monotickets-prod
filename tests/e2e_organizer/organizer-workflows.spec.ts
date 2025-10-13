@@ -7,8 +7,9 @@ type EventRecord = {
   id: string;
   name: string;
   type: 'standard' | 'premium';
-  landing_ttl_days: number;
-  start_date: string;
+  landingKind: 'standard' | 'premium';
+  landingTtlDays: number;
+  startsAt: string;
   location?: string;
 };
 
@@ -57,19 +58,20 @@ test.describe('@organizer @cross-browser organizer workflows', () => {
           id,
           name: payload.name,
           type: payload.type ?? 'standard',
-          landing_ttl_days: payload.landing_ttl_days ?? 7,
-          start_date: payload.start_date,
+          landingKind: payload.landingKind ?? payload.type ?? 'standard',
+          landingTtlDays: payload.landingTtlDays ?? 7,
+          startsAt: payload.startsAt,
           location: payload.location,
         };
         createdEvents.push(record);
         guestStore.set(id, []);
-        return fulfill(201, {
-          ...record,
-          status: 'draft',
-          landing_kind: record.type,
-          end_date: payload.end_date ?? null,
-          description: payload.description ?? '',
-        });
+          return fulfill(201, {
+            ...record,
+            status: 'draft',
+            landingKind: record.landingKind,
+            endsAt: payload.endsAt ?? null,
+            description: payload.description ?? '',
+          });
       }
 
       const eventIdMatch = path.match(/^\/events\/([^/]+)/);
@@ -83,10 +85,10 @@ test.describe('@organizer @cross-browser organizer workflows', () => {
         if (!event) {
           return fulfill(404, { error: 'not_found' });
         }
-        return fulfill(200, {
-          ...event,
-          status: 'draft',
-          landing_kind: event.type,
+          return fulfill(200, {
+            ...event,
+            status: 'draft',
+            landingKind: event.landingKind,
           metrics: {
             confirmationRate: 0,
             averageConfirmationTimeMinutes: 0,

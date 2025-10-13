@@ -1,3 +1,5 @@
+import { handleError } from '@shared/api/errors';
+
 export interface DirectorOverview {
   eventsByType: {
     standard: number;
@@ -181,8 +183,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       cache: 'no-store',
     });
     if (!res.ok) {
-      const detail = await res.text();
-      throw new Error(`Request failed: ${res.status} ${res.statusText} ${detail}`);
+      await handleError(res, { scope: 'director-api', request: path });
     }
     return res.json() as Promise<T>;
   } catch (error) {

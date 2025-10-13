@@ -71,14 +71,14 @@ export default function NewEventPage() {
           name: coverData.name,
           description: coverData.description,
           location: coverData.location,
-          start_date: coverData.startDate,
-          end_date: coverData.endDate || undefined,
+          startsAt: coverData.startDate,
+          endsAt: coverData.endDate || undefined,
           type: coverData.type,
-          cover_url: coverData.coverUrl || undefined,
-          pdf_url: coverData.pdfUrl || undefined,
-          flipbook_url: coverData.flipbookUrl || undefined,
-          landing_url: coverData.landingUrl || undefined,
-          landing_ttl_days: coverData.landingTtlDays,
+          coverUrl: coverData.coverUrl || undefined,
+          pdfUrl: coverData.pdfUrl || undefined,
+          flipbookUrl: coverData.flipbookUrl || undefined,
+          landingUrl: coverData.landingUrl || undefined,
+          landingTtlDays: coverData.landingTtlDays,
         };
         const created = await createEvent(payload);
         const addedGuests = await Promise.all(

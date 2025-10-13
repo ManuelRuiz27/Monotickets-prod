@@ -1,14 +1,30 @@
-import { query } from '../db/index.js';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+import { query, withTransaction } from '../db/index.js';
 import { ensureRedis } from '../redis/client.js';
 
 const CACHE_KEY_OVERVIEW = 'director:overview';
 const CACHE_TTL_SECONDS = 45;
 const DEFAULT_PREMIUM_FACTOR = 2;
 
+class LedgerPaymentError extends Error {
+  constructor(code, statusCode = 400) {
+    super(code);
+    this.name = 'LedgerPaymentError';
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
+
 export function createDirectorModule(options = {}) {
   const { env = process.env, logger } = options;
   const log = logger || ((payload) => console.log(JSON.stringify(payload)));
   const premiumFactor = Math.max(1, Number(env.TICKET_PREMIUM_FACTOR || DEFAULT_PREMIUM_FACTOR));
+  const db = {
+    query: options.db?.query || ((text, params) => query(text, params)),
+    withTransaction:
+      options.db?.withTransaction || ((fn) => withTransaction((client) => fn({ query: client.query.bind(client) }))),
+  };
 
   async function assignTickets({ body = {}, requestId }) {
     const organizerId = normalizeId(body.organizerId || body.organizer_id);
@@ -18,7 +34,7 @@ export function createDirectorModule(options = {}) {
     const price = Number(body.price || 0);
     const metadata = sanitizeMetadata(body.metadata);
 
-    if (!organizerId) {
+    if (!organizerId && !ledgerTicketId) {
       return { statusCode: 400, payload: { error: 'organizer_id_required' } };
     }
     if (!eventId) {
@@ -31,7 +47,7 @@ export function createDirectorModule(options = {}) {
       return { statusCode: 400, payload: { error: 'invalid_tickets' } };
     }
 
-    const eventInfo = await loadEvent(eventId);
+    const eventInfo = await loadEvent(eventId, db.query);
     if (!eventInfo) {
       return { statusCode: 404, payload: { error: 'event_not_found' } };
     }
@@ -41,7 +57,7 @@ export function createDirectorModule(options = {}) {
     const amountCents = unitPriceCents * tickets;
     const entryType = type === 'loan' ? 'assign_loan' : 'assign_prepaid';
 
-    const result = await query(
+    const result = await db.query(
       `INSERT INTO director_ledger_entries (
          organizer_id, event_id, entry_type, tickets, tickets_equivalent,
          unit_price_cents, amount_cents, currency, metadata
@@ -61,9 +77,37 @@ export function createDirectorModule(options = {}) {
       ],
     );
 
+    const unitPrice = Number.isFinite(price) ? Number(price) : 0;
+    const amountDue = Math.max(0, Number((unitPrice * tickets).toFixed(2)));
+
+    await db.query(
+      `
+        INSERT INTO ledger_tickets (
+          organizer_id,
+          event_id,
+          tickets_assigned,
+          tickets_used,
+          tickets_type,
+          unit_price_mxn,
+          amount_due,
+          paid,
+          payment_ref
+        )
+        VALUES ($1, $2, $3, 0, $4, $5, $6, false, NULL)
+      `,
+      [
+        organizerId,
+        eventId,
+        tickets,
+        type,
+        unitPrice.toFixed(2),
+        amountDue.toFixed(2),
+      ],
+    );
+
     await invalidateOverviewCache(env);
 
-    const summary = await loadLedgerSummary(organizerId);
+    const summary = await loadLedgerSummary(organizerId, db.query);
     log({
       level: 'info',
       message: 'director_assignment_recorded',
@@ -98,7 +142,7 @@ export function createDirectorModule(options = {}) {
     }
 
     const [entriesResult, summary] = await Promise.all([
-      query(
+      db.query(
         `SELECT id, event_id, entry_type, tickets, tickets_equivalent, unit_price_cents,
                 amount_cents, currency, metadata, created_at
            FROM director_ledger_entries
@@ -107,7 +151,7 @@ export function createDirectorModule(options = {}) {
           LIMIT 200`,
         [id],
       ),
-      loadLedgerSummary(id),
+      loadLedgerSummary(id, db.query),
     ]);
 
     return {
@@ -120,13 +164,17 @@ export function createDirectorModule(options = {}) {
     };
   }
 
+
   async function recordPayment({ body = {}, requestId }) {
     const amount = Number(body.amount || 0);
     const currency = (body.currency || 'mxn').toLowerCase();
     const eventId = normalizeId(body.eventId || body.event_id);
     const organizerId = normalizeId(body.organizerId || body.organizer_id);
-    const provider = body.provider || 'manual';
+    const method = normalizePaymentMethod(body.method || body.provider || 'manual');
     const metadata = sanitizeMetadata(body.metadata) || {};
+    const ledgerTicketId = normalizeId(body.ledgerTicketId || body.ledger_ticket_id);
+    const paymentRef = normalizeId(body.paymentRef || body.providerRef || body.payment_ref);
+    const note = typeof body.note === 'string' ? body.note : undefined;
 
     if (!organizerId) {
       return { statusCode: 400, payload: { error: 'organizer_id_required' } };
@@ -134,61 +182,286 @@ export function createDirectorModule(options = {}) {
     if (!Number.isFinite(amount) || amount <= 0) {
       return { statusCode: 400, payload: { error: 'invalid_amount' } };
     }
+    if (!ledgerTicketId && !paymentRef && !eventId) {
+      return { statusCode: 400, payload: { error: 'ledger_ticket_required' } };
+    }
 
     const amountCents = Math.round(amount * 100);
-    const paymentResult = await query(
-      `INSERT INTO payments (event_id, organizer_id, amount_cents, currency, status, provider, provider_ref, metadata, confirmed_at)
-       VALUES ($1, $2, $3, $4, 'confirmed', $5, $6, $7::jsonb, now())
-       RETURNING id`,
-      [
-        eventId,
-        organizerId,
-        amountCents,
-        currency,
-        provider,
-        body.providerRef || null,
-        JSON.stringify({ ...metadata, requestId }),
-      ],
-    );
+    let operationResult;
 
-    const ledgerResult = await query(
-      `INSERT INTO director_ledger_entries (
-         organizer_id, event_id, entry_type, tickets, tickets_equivalent,
-         unit_price_cents, amount_cents, currency, metadata
-       )
-       VALUES ($1, $2, 'payment', 0, 0, 0, $3, $4, $5::jsonb)
-       RETURNING id, created_at`,
-      [
-        organizerId,
-        eventId,
-        amountCents,
-        currency,
-        JSON.stringify({ ...metadata, paymentId: paymentResult.rows[0]?.id || null }),
-      ],
-    );
+    try {
+      operationResult = await db.withTransaction(async ({ query: txn }) => {
+        let ledgerRow = null;
+
+        if (ledgerTicketId) {
+          const ledgerLookup = await txn(
+            `SELECT * FROM ledger_tickets WHERE id = $1 FOR UPDATE`,
+            [ledgerTicketId],
+          );
+          if (ledgerLookup.rowCount === 0) {
+            throw new LedgerPaymentError('ledger_ticket_not_found', 404);
+          }
+          ledgerRow = ledgerLookup.rows[0];
+          if (organizerId && ledgerRow.organizer_id !== organizerId) {
+            throw new LedgerPaymentError('organizer_mismatch', 409);
+          }
+        }
+
+        if (paymentRef) {
+          const refLookup = await txn(
+            `SELECT * FROM ledger_tickets WHERE payment_ref = $1 FOR UPDATE`,
+            [paymentRef],
+          );
+          if (refLookup.rowCount > 0) {
+            const existing = refLookup.rows[0];
+            if (!ledgerRow) {
+              ledgerRow = existing;
+            }
+            if (existing.paid) {
+              return { duplicate: true, ledgerTicket: existing, payment: null, entry: null };
+            }
+          }
+        }
+
+        if (!ledgerRow) {
+          if (!organizerId) {
+            throw new LedgerPaymentError('organizer_id_required', 400);
+          }
+          const seedAmount = Number.isFinite(amount) ? amount : 0;
+          const inserted = await txn(
+            `
+              INSERT INTO ledger_tickets (
+                organizer_id,
+                event_id,
+                tickets_assigned,
+                tickets_used,
+                tickets_type,
+                unit_price_mxn,
+                amount_due,
+                paid,
+                payment_ref
+              )
+              VALUES ($1, $2, 0, 0, 'manual', 0, $3, false, NULL)
+              RETURNING *
+            `,
+            [organizerId, eventId, seedAmount.toFixed(2)],
+          );
+          ledgerRow = inserted.rows[0];
+        }
+
+        if (ledgerRow.paid && (!paymentRef || ledgerRow.payment_ref === paymentRef)) {
+          return { duplicate: true, ledgerTicket: ledgerRow, payment: null, entry: null };
+        }
+        if (ledgerRow.paid && paymentRef && ledgerRow.payment_ref && ledgerRow.payment_ref !== paymentRef) {
+          throw new LedgerPaymentError('ledger_ticket_already_paid', 409);
+        }
+
+        const ownerId = organizerId || ledgerRow.organizer_id;
+
+        const paymentInsert = await txn(
+          `
+            INSERT INTO payments (
+              event_id,
+              organizer_id,
+              amount_cents,
+              currency,
+              status,
+              provider,
+              provider_ref,
+              metadata,
+              confirmed_at
+            )
+            VALUES ($1, $2, $3, $4, 'confirmed', $5, $6, $7::jsonb, now())
+            RETURNING id
+          `,
+          [
+            eventId,
+            ownerId,
+            amountCents,
+            currency,
+            method,
+            paymentRef,
+            JSON.stringify({ ...metadata, requestId, ledgerTicketId: ledgerRow.id, note }),
+          ],
+        );
+
+        const entryInsert = await txn(
+          `
+            INSERT INTO director_ledger_entries (
+              organizer_id,
+              event_id,
+              entry_type,
+              tickets,
+              tickets_equivalent,
+              unit_price_cents,
+              amount_cents,
+              currency,
+              metadata
+            )
+            VALUES ($1, $2, 'payment', 0, 0, 0, $3, $4, $5::jsonb)
+            RETURNING id, created_at
+          `,
+          [
+            ownerId,
+            eventId,
+            amountCents,
+            currency,
+            JSON.stringify({
+              ...metadata,
+              paymentId: paymentInsert.rows[0]?.id || null,
+            ledgerTicketId: ledgerRow.id,
+            method,
+            note,
+          }),
+          ],
+        );
+
+        const currentDue = Number(ledgerRow.amount_due || 0);
+        const remainingDue = Math.max(0, Number((currentDue - amount).toFixed(2)));
+        const updatedTicket = await txn(
+          `
+            UPDATE ledger_tickets
+               SET amount_due = $1,
+                   paid = $2,
+                   payment_ref = COALESCE($3, payment_ref),
+                   updated_at = now()
+             WHERE id = $4
+             RETURNING *
+          `,
+          [remainingDue.toFixed(2), remainingDue <= 0.01, paymentRef, ledgerRow.id],
+        );
+
+        return {
+          duplicate: false,
+          payment: paymentInsert.rows[0],
+          entry: entryInsert.rows[0],
+          ledgerTicket: updatedTicket.rows[0],
+          remainingDue,
+          organizerId: ownerId,
+        };
+      });
+    } catch (error) {
+      if (error instanceof LedgerPaymentError) {
+        return { statusCode: error.statusCode, payload: { error: error.code } };
+      }
+      throw error;
+    }
+
+    if (operationResult.duplicate) {
+      log({
+        level: 'info',
+        message: 'director_payment_recorded',
+        payment_ref: paymentRef,
+        amount_cents: amountCents,
+        method,
+        result: 'duplicate',
+        organizer_id: operationResult.ledgerTicket.organizer_id,
+        request_id: requestId,
+      });
+      return {
+        statusCode: 200,
+        payload: {
+          status: 'duplicate',
+          ledgerTicketId: operationResult.ledgerTicket.id,
+          totals: await loadLedgerSummary(operationResult.ledgerTicket.organizer_id, db.query),
+        },
+      };
+    }
 
     await invalidateOverviewCache(env);
+    const summary = await loadLedgerSummary(operationResult.organizerId, db.query);
+    const resultStatus = operationResult.remainingDue <= 0.01 ? 'applied' : 'partial';
 
-    const summary = await loadLedgerSummary(organizerId);
     log({
       level: 'info',
       message: 'director_payment_recorded',
-      payment_id: paymentResult.rows[0]?.id,
-      entry_id: ledgerResult.rows[0]?.id,
-      organizer_id: organizerId,
+      payment_id: operationResult.payment?.id,
+      entry_id: operationResult.entry?.id,
+      payment_ref: paymentRef,
       amount_cents: amountCents,
+      method,
+      result: resultStatus,
+      organizer_id: operationResult.organizerId,
       request_id: requestId,
     });
 
     return {
       statusCode: 201,
       payload: {
-        paymentId: paymentResult.rows[0]?.id,
-        entryId: ledgerResult.rows[0]?.id,
-        status: 'confirmed',
+        paymentId: operationResult.payment?.id,
+        entryId: operationResult.entry?.id,
+        ledgerTicketId: operationResult.ledgerTicket.id,
+        status: resultStatus,
         totals: summary,
       },
     };
+  }
+
+
+  async function handleWebhook({ body = {}, headers = {}, rawBody = '', requestId }) {
+    const headerMap = normalizeHeaders(headers);
+    const provider = detectWebhookProvider(headerMap, body);
+
+    if (!provider) {
+      return { statusCode: 400, payload: { error: 'unknown_provider' } };
+    }
+
+    const payloadString = typeof rawBody === 'string' && rawBody.length > 0 ? rawBody : JSON.stringify(body || {});
+
+    if (provider === 'stripe') {
+      const secret = env.STRIPE_WEBHOOK_SECRET;
+      if (!secret) {
+        return { statusCode: 503, payload: { error: 'webhook_secret_missing' } };
+      }
+      if (!verifyStripeSignature(payloadString, headerMap['stripe-signature'], secret)) {
+        log({ level: 'warn', message: 'director_webhook_signature_invalid', provider, request_id: requestId });
+        return { statusCode: 401, payload: { error: 'invalid_signature' } };
+      }
+    } else if (provider === 'conekta') {
+      const secret = env.CONEKTA_WEBHOOK_SECRET;
+      if (!secret) {
+        return { statusCode: 503, payload: { error: 'webhook_secret_missing' } };
+      }
+      const signature = headerMap['x-conekta-signature'] || headerMap['conekta-signature'];
+      if (!verifyConektaSignature(payloadString, signature, secret)) {
+        log({ level: 'warn', message: 'director_webhook_signature_invalid', provider, request_id: requestId });
+        return { statusCode: 401, payload: { error: 'invalid_signature' } };
+      }
+    }
+
+    let event;
+    try {
+      event = provider === 'stripe' ? extractStripePayment(body) : extractConektaPayment(body);
+    } catch (error) {
+      log({ level: 'error', message: 'director_webhook_parse_failed', provider, error: error.message, request_id: requestId });
+      return { statusCode: 400, payload: { error: 'invalid_payload' } };
+    }
+
+    if (!event?.ledgerTicketId) {
+      log({ level: 'info', message: 'director_webhook_missing_ledger', provider, request_id: requestId });
+      return { statusCode: 202, payload: { status: 'ignored' } };
+    }
+
+    if (!event.paid) {
+      log({ level: 'info', message: 'director_webhook_pending', provider, request_id: requestId, payment_ref: event.paymentRef });
+      return { statusCode: 202, payload: { status: 'pending' } };
+    }
+
+    const paymentResponse = await recordPayment({
+      body: {
+        amount: event.amount,
+        currency: event.currency,
+        eventId: event.eventId,
+        organizerId: event.organizerId,
+        ledgerTicketId: event.ledgerTicketId,
+        paymentRef: event.paymentRef,
+        method: provider,
+        metadata: { ...(event.metadata || {}), provider, source: 'webhook' },
+      },
+      requestId,
+    });
+
+    return paymentResponse;
   }
 
   async function getOverview() {
@@ -249,6 +522,7 @@ export function createDirectorModule(options = {}) {
     getOrganizerLedger,
     recordPayment,
     registerPayment,
+    handleWebhook,
     getOverview,
   };
 }
@@ -271,8 +545,8 @@ function sanitizeMetadata(metadata) {
   }
 }
 
-async function loadEvent(eventId) {
-  const result = await query('SELECT id, type FROM events WHERE id = $1', [eventId]);
+async function loadEvent(eventId, runQuery = query) {
+  const result = await runQuery('SELECT id, type FROM events WHERE id = $1', [eventId]);
   return result.rows[0] || null;
 }
 
@@ -283,8 +557,22 @@ function computeEquivalentTickets({ tickets, eventType, premiumFactor }) {
   return Math.round(tickets);
 }
 
-async function loadLedgerSummary(organizerId) {
-  const result = await query(
+function normalizePaymentMethod(method) {
+  if (typeof method !== 'string') {
+    return 'manual';
+  }
+  const normalized = method.trim().toLowerCase();
+  if (!normalized) {
+    return 'manual';
+  }
+  if (['manual', 'stripe', 'conekta', 'webhook'].includes(normalized)) {
+    return normalized;
+  }
+  return normalized;
+}
+
+async function loadLedgerSummary(organizerId, runQuery = query) {
+  const result = await runQuery(
     `SELECT
         COALESCE(SUM(CASE WHEN entry_type IN ('assign_prepaid', 'assign_loan') THEN tickets_equivalent ELSE 0 END), 0) AS tickets_equivalent,
         COALESCE(SUM(CASE WHEN entry_type IN ('assign_prepaid', 'assign_loan') THEN amount_cents ELSE 0 END), 0) AS assigned_amount_cents,
@@ -297,11 +585,20 @@ async function loadLedgerSummary(organizerId) {
   const row = result.rows[0] || {};
   const assigned = Number(row.assigned_amount_cents || 0);
   const payments = Number(row.payments_cents || 0);
+  const ledgerTickets = await runQuery(
+    `SELECT COALESCE(SUM(amount_due), 0) AS amount_due
+       FROM ledger_tickets
+      WHERE organizer_id = $1
+        AND paid = false`,
+    [organizerId],
+  );
+  const outstandingMx = Number(ledgerTickets.rows[0]?.amount_due || 0);
   return {
     ticketsEquivalent: Number(row.tickets_equivalent || 0),
     assignedAmountCents: assigned,
     paymentsCents: payments,
     balanceCents: assigned - payments,
+    outstandingAmountMXN: Number(outstandingMx.toFixed(2)),
   };
 }
 
@@ -320,7 +617,131 @@ function mapLedgerEntry(row) {
   };
 }
 
+function normalizeHeaders(headers = {}) {
+  const normalized = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    const lower = key.toLowerCase();
+    normalized[lower] = Array.isArray(value) ? value[0] : value;
+  }
+  return normalized;
+}
+
+function detectWebhookProvider(headers = {}, body = {}) {
+  if (headers['stripe-signature']) {
+    return 'stripe';
+  }
+  if (headers['x-conekta-signature'] || headers['conekta-signature']) {
+    return 'conekta';
+  }
+  if (typeof body?.provider === 'string') {
+    const normalized = body.provider.toLowerCase();
+    if (normalized === 'stripe' || normalized === 'conekta') {
+      return normalized;
+    }
+  }
+  return null;
+}
+
+function verifyStripeSignature(rawPayload, signatureHeader, secret) {
+  if (!signatureHeader || !secret) {
+    return false;
+  }
+  const parts = Object.fromEntries(
+    String(signatureHeader)
+      .split(',')
+      .map((segment) => segment.split('='))
+      .filter((segment) => segment.length === 2),
+  );
+  const timestamp = parts.t;
+  const expectedSignature = parts.v1;
+  if (!timestamp || !expectedSignature) {
+    return false;
+  }
+  const payload = `${timestamp}.${rawPayload}`;
+  const digest = createHmac('sha256', secret).update(payload).digest('hex');
+  const provided = Buffer.from(expectedSignature, 'hex');
+  const computed = Buffer.from(digest, 'hex');
+  if (provided.length !== computed.length) {
+    return false;
+  }
+  return timingSafeEqual(provided, computed);
+}
+
+function verifyConektaSignature(rawPayload, signatureHeader, secret) {
+  if (!signatureHeader || !secret) {
+    return false;
+  }
+  const digest = createHmac('sha256', secret).update(rawPayload).digest('hex');
+  const provided = Buffer.from(String(signatureHeader), 'hex');
+  const computed = Buffer.from(digest, 'hex');
+  if (provided.length !== computed.length) {
+    return false;
+  }
+  return timingSafeEqual(provided, computed);
+}
+
+function extractStripePayment(payload = {}) {
+  const object = payload?.data?.object || {};
+  const metadata = object.metadata || {};
+  const ledgerTicketId = normalizeId(metadata.ledger_ticket_id || metadata.ledgerTicketId);
+  const organizerId = normalizeId(metadata.organizer_id || metadata.organizerId);
+  const eventId = normalizeId(metadata.event_id || metadata.eventId);
+  const amountRaw = Number(object.amount_received ?? object.amount ?? 0);
+  const amount = Number((amountRaw / 100).toFixed(2));
+  const status = String(object.status || payload.type || '').toLowerCase();
+  const paymentRef = object.id || payload.data?.id || null;
+  const paid =
+    status === 'succeeded' ||
+    status === 'paid' ||
+    status === 'completed' ||
+    payload.type === 'payment_intent.succeeded';
+  return {
+    ledgerTicketId,
+    organizerId,
+    eventId,
+    amount,
+    currency: (object.currency || 'mxn').toLowerCase(),
+    paymentRef,
+    paid,
+    metadata,
+  };
+}
+
+function extractConektaPayment(payload = {}) {
+  const data = payload?.data?.object || payload?.data || payload || {};
+  const metadata = data.metadata || {};
+  const charges = Array.isArray(data?.charges?.data) ? data.charges.data : [];
+  const charge = charges[0] || {};
+  const ledgerTicketId = normalizeId(metadata.ledger_ticket_id || metadata.ledgerTicketId);
+  const organizerId = normalizeId(metadata.organizer_id || metadata.organizerId);
+  const eventId = normalizeId(metadata.event_id || metadata.eventId);
+  const amountRaw = Number(data.amount ?? charge.amount ?? data.amount_paid ?? 0);
+  const amount = Number((amountRaw / 100).toFixed(2));
+  const status = String(data.status || charge.status || payload.type || '').toLowerCase();
+  const paid = ['paid', 'succeeded', 'completed'].includes(status);
+  return {
+    ledgerTicketId,
+    organizerId,
+    eventId,
+    amount,
+    currency: (data.currency || charge.currency || 'mxn').toLowerCase(),
+    paymentRef: charge.payment_method?.reference || data.id || charge.id || null,
+    paid,
+    metadata,
+  };
+}
+
 async function invalidateOverviewCache(env) {
-  const redis = await ensureRedis({ name: 'director-cache', env });
-  await redis.del(CACHE_KEY_OVERVIEW);
+  if (String(env?.DIRECTOR_CACHE_DISABLE || '').toLowerCase() === 'true') {
+    return;
+  }
+  try {
+    const redis = await ensureRedis({ name: 'director-cache', env });
+    await redis.del(CACHE_KEY_OVERVIEW);
+  } catch (error) {
+    // Swallow cache errors in non-critical paths (e.g., unit tests)
+    if (env?.NODE_ENV !== 'test') {
+      console.warn('[director] cache invalidation skipped:', error.message);
+    }
+  }
 }

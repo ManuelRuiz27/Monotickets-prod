@@ -127,10 +127,10 @@ export default function OrganizerDashboardPage() {
                     {event.name}
                   </h2>
                   <p style={cardMetaStyle}>
-                    {new Date(event.start_date).toLocaleString()} {event.end_date && `— ${new Date(event.end_date).toLocaleString()}`}
+                    {new Date(event.startsAt).toLocaleString()} {event.endsAt && `— ${new Date(event.endsAt).toLocaleString()}`}
                   </p>
                   <p style={cardMetaStyle}>
-                    Tipo: {kindLabels[event.type]} · Landing: {kindLabels[event.landing_kind]}
+                    Tipo: {kindLabels[event.type]} · Landing: {kindLabels[event.landingKind]}
                   </p>
                   <p style={cardMetaStyle}>Estado: {statusLabels[event.status]}</p>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: spacing.sm, marginTop: spacing.md }}>
