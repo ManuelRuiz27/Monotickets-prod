@@ -173,7 +173,7 @@ export default function EventDashboardPage({ params }: PageProps) {
               {event.name}
             </h1>
             <p style={subtitleStyle}>
-              {new Date(event.start_date).toLocaleString()} · {event.location ?? 'Ubicación por definir'}
+              {new Date(event.startsAt).toLocaleString()} · {event.location ?? 'Ubicación por definir'}
             </p>
             <Link href={`/invite/${event.id}`} style={secondaryLinkStyle}>
               Ver landing pública
@@ -307,7 +307,7 @@ export default function EventDashboardPage({ params }: PageProps) {
                         <tr key={guest.id}>
                           <td>{guest.name}</td>
                           <td>{formatPhone(guest.phone)}</td>
-                          <td>{guest.scanned_at ? new Date(guest.scanned_at).toLocaleTimeString() : '—'}</td>
+                          <td>{guest.scannedAt ? new Date(guest.scannedAt).toLocaleTimeString() : '—'}</td>
                         </tr>
                       ))}
                     </tbody>

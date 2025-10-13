@@ -6,13 +6,28 @@ import { ensureRedis } from './redis/client.js';
 import { query } from './db/index.js';
 import { CircuitBreaker } from './lib/circuit-breaker.js';
 import { runLandingTtlJob } from './jobs/landing-ttl.js';
+import {
+  buildTemplateVars,
+  buildWhatsappComponentsFromVars,
+  buildEmailContentFromTemplate,
+} from './modules/delivery-templates.js';
 
 const env = process.env;
 const logger = createLogger({ env, service: env.SERVICE_NAME || 'workers' });
 
-const deliveryQueueName = env.WA_OUTBOUND_QUEUE_NAME || env.DELIVERY_QUEUE_NAME || 'wa_outbound';
+const whatsappQueueName =
+  env.WHATSAPP_QUEUE_NAME || env.WA_OUTBOUND_QUEUE_NAME || env.DELIVERY_QUEUE_NAME || 'queue:whatsapp';
+const emailQueueName = env.EMAIL_QUEUE_NAME || 'queue:email';
+const pdfQueueName = env.PDF_QUEUE_NAME || 'queue:pdf';
 const waInboundQueueName = env.WA_INBOUND_QUEUE_NAME || 'wa_inbound';
 const paymentsQueueName = env.PAYMENTS_QUEUE_NAME || 'paymentsQueue';
+const deliveryFailedQueueName = env.DELIVERY_FAILED_QUEUE_NAME || 'queue:delivery:failed';
+
+const deliveryFailedQueue = new SimpleQueue(deliveryFailedQueueName, {
+  logger,
+  connectionOptions: { env, logger },
+  defaultJobOptions: { attempts: 1, backoff: { type: 'fixed', delay: 0 }, removeOnComplete: false, removeOnFail: false },
+});
 
 const whatsappBreaker = new CircuitBreaker({
   failureThreshold: Number(env.WA_FAILURE_THRESHOLD || 3),
@@ -24,12 +39,17 @@ const emailBreaker = new CircuitBreaker({
 });
 
 async function main() {
-  logger({ level: 'info', message: 'worker_started', queues: [deliveryQueueName, waInboundQueueName, paymentsQueueName] });
+  logger({
+    level: 'info',
+    message: 'worker_started',
+    queues: [whatsappQueueName, emailQueueName, pdfQueueName, waInboundQueueName, paymentsQueueName, deliveryFailedQueueName],
+  });
 
   await ensureRedis({ name: 'workers', env });
 
   await Promise.all([
-    bootstrapDeliveryWorker(),
+    bootstrapOutboundWorker({ queueName: whatsappQueueName, channel: 'whatsapp' }),
+    bootstrapOutboundWorker({ queueName: emailQueueName, channel: 'email' }),
     bootstrapWaInboundWorker(),
     bootstrapPaymentsWorker(),
   ]);
@@ -38,9 +58,9 @@ async function main() {
   scheduleQueueMetrics();
 }
 
-async function bootstrapDeliveryWorker() {
+async function bootstrapOutboundWorker({ queueName, channel }) {
   const worker = await createSimpleWorker(
-    deliveryQueueName,
+    queueName,
     async (job) => {
       logger({
         level: 'info',
@@ -50,8 +70,10 @@ async function bootstrapDeliveryWorker() {
         event_id: job.data.eventId,
         guest_id: job.data.guestId,
         attempt: job.attemptsMade + 1,
+        queue: queueName,
+        channel: channel || job.data.channel,
       });
-      await processDeliveryJob(job);
+      await processDeliveryJob(job, { queueName, channel });
     },
     {
       logger,
@@ -61,12 +83,24 @@ async function bootstrapDeliveryWorker() {
     },
   );
 
-  const events = new SimpleQueueEvents(deliveryQueueName, { connectionOptions: { env, logger } });
+  const events = new SimpleQueueEvents(queueName, { connectionOptions: { env, logger } });
   events.on('failed', ({ jobId, job }) => {
-    logger({ level: 'error', message: 'delivery_job_failed', job_id: jobId, request_id: job?.requestId });
+    logger({
+      level: 'error',
+      message: 'delivery_job_failed',
+      job_id: jobId,
+      request_id: job?.requestId,
+      queue: queueName,
+    });
   });
   events.on('dead-letter', ({ jobId, job }) => {
-    logger({ level: 'error', message: 'delivery_job_dead_letter', job_id: jobId, request_id: job?.requestId });
+    logger({
+      level: 'error',
+      message: 'delivery_job_dead_letter',
+      job_id: jobId,
+      request_id: job?.requestId,
+      queue: queueName,
+    });
   });
   events.start();
 
@@ -127,7 +161,7 @@ async function bootstrapPaymentsWorker() {
   return worker;
 }
 
-async function processDeliveryJob(job) {
+async function processDeliveryJob(job, options = {}) {
   const data = job?.data || {};
   const requestId = data.requestId;
   if (!requestId) {
@@ -161,12 +195,12 @@ async function processDeliveryJob(job) {
   });
 
   const guestId = data.guestId || request.guest_id;
-  const channel = data.channel || request.channel;
+  const channel = options.channel || data.channel || request.channel;
   const template = data.template || request.template;
   const basePayload = data.payload ?? request.payload ?? {};
   const payload = typeof basePayload === 'object' && basePayload !== null ? basePayload : {};
 
-  const guestResult = await query('SELECT id, phone, email, event_id FROM guests WHERE id = $1', [guestId]);
+  const guestResult = await query('SELECT id, name, phone, email, event_id FROM guests WHERE id = $1', [guestId]);
   if (guestResult.rowCount === 0) {
     await failDeliveryAttempt({
       requestId,
@@ -178,16 +212,27 @@ async function processDeliveryJob(job) {
   }
 
   const guest = guestResult.rows[0];
+  const eventResult = await query('SELECT id, name, starts_at, ends_at FROM events WHERE id = $1', [request.event_id]);
+  const event = eventResult.rows[0] || null;
+  const templateVars = buildTemplateVars({ template, baseVars: payload.vars, guest, event });
+  const whatsappPayload = {
+    ...payload,
+    vars: templateVars,
+    components: buildWhatsappComponentsFromVars(template, templateVars),
+  };
+  const emailTemplate = buildEmailContentFromTemplate({ template, vars: templateVars, payload });
+  const emailPayload = { ...payload, vars: templateVars, ...emailTemplate };
+
   let providerRef = null;
   let finalStatus = 'sent';
 
   try {
     if (channel === 'whatsapp') {
-      const result = await sendWhatsAppMessage({ guest, template, payload });
+      const result = await sendWhatsAppMessage({ guest, template, payload: whatsappPayload });
       providerRef = result.providerRef;
       finalStatus = result.status || 'sent';
     } else {
-      const result = await sendEmailMessage({ guest, template, payload });
+      const result = await sendEmailMessage({ guest, template, payload: emailPayload });
       providerRef = result.providerRef;
       finalStatus = result.status || 'sent';
     }
@@ -203,7 +248,7 @@ async function processDeliveryJob(job) {
     const errorInfo = { channel, message: error.message };
     if (channel === 'whatsapp') {
       try {
-        const result = await sendEmailMessage({ guest, template, payload });
+        const result = await sendEmailMessage({ guest, template, payload: emailPayload });
         providerRef = result.providerRef;
         finalStatus = result.status || 'sent';
       } catch (fallbackError) {
@@ -248,6 +293,7 @@ async function processDeliveryJob(job) {
       attemptId: attempt.attemptId,
       status: finalStatus,
       providerRef,
+      guestId,
     });
 
     logger({
@@ -258,6 +304,7 @@ async function processDeliveryJob(job) {
       attempt: attempt.attemptNumber,
       status: completion.status,
       provider_ref: providerRef,
+      channel,
     });
   } catch (error) {
     const willRetry = job.attemptsMade + 1 < Number(job.opts?.attempts || 1);
@@ -485,7 +532,7 @@ async function beginDeliveryAttempt({ requestId, metadata }) {
   return { attemptId: result.rows[0].id, attemptNumber };
 }
 
-async function completeDeliveryAttempt({ requestId, attemptId, status, providerRef }) {
+async function completeDeliveryAttempt({ requestId, attemptId, status, providerRef, guestId }) {
   await query(
     `
       UPDATE delivery_logs
@@ -502,10 +549,10 @@ async function completeDeliveryAttempt({ requestId, attemptId, status, providerR
     try {
       await query(
         `
-          INSERT INTO delivery_provider_refs (provider_ref, request_id, attempt_id)
-          VALUES ($1, $2, $3)
+          INSERT INTO delivery_provider_refs (provider_ref, request_id, attempt_id, guest_id)
+          VALUES ($1, $2, $3, $4)
         `,
-        [providerRef, requestId, attemptId],
+        [providerRef, requestId, attemptId, guestId || null],
       );
     } catch (error) {
       if (error?.code === '23505') {
@@ -525,7 +572,7 @@ async function completeDeliveryAttempt({ requestId, attemptId, status, providerR
                    last_provider_ref = $1,
                    last_error = NULL,
                    updated_at = now()
-             WHERE id = $2
+            WHERE id = $2
           `,
           [providerRef, requestId],
         );
@@ -571,6 +618,22 @@ async function failDeliveryAttempt({ requestId, attemptId, errorInfo, willRetry 
     `,
     [willRetry ? 'retrying' : 'failed', JSON.stringify(errorInfo), requestId],
   );
+  if (!willRetry) {
+    try {
+      await deliveryFailedQueue.add(
+        'delivery-failed',
+        {
+          requestId,
+          attemptId,
+          error: errorInfo,
+          failedAt: new Date().toISOString(),
+        },
+        { attempts: 1, removeOnComplete: false, removeOnFail: false },
+      );
+    } catch (error) {
+      logger({ level: 'error', message: 'delivery_dlq_enqueue_failed', request_id: requestId, error: error.message });
+    }
+  }
 }
 
 function logRetrySchedule({ requestId, attempt, willRetry, backoff, attemptsMade }) {
@@ -797,18 +860,19 @@ function scheduleLandingJob() {
 
 function scheduleQueueMetrics() {
   const interval = Number(env.QUEUE_METRICS_INTERVAL_MS || 30000);
-  const deliveryMetrics = new SimpleQueue(deliveryQueueName, { connectionOptions: { env, logger } });
-  const waMetrics = new SimpleQueue(waInboundQueueName, { connectionOptions: { env, logger } });
-  const paymentsMetrics = new SimpleQueue(paymentsQueueName, { connectionOptions: { env, logger } });
+  const trackedQueues = [
+    { name: 'whatsapp', queue: new SimpleQueue(whatsappQueueName, { connectionOptions: { env, logger } }) },
+    { name: 'email', queue: new SimpleQueue(emailQueueName, { connectionOptions: { env, logger } }) },
+    { name: 'pdf', queue: new SimpleQueue(pdfQueueName, { connectionOptions: { env, logger } }) },
+    { name: 'waInbound', queue: new SimpleQueue(waInboundQueueName, { connectionOptions: { env, logger } }) },
+    { name: 'payments', queue: new SimpleQueue(paymentsQueueName, { connectionOptions: { env, logger } }) },
+    { name: 'deliveryFailed', queue: deliveryFailedQueue },
+  ];
 
   const logMetrics = async () => {
     try {
-      const [delivery, wa, payments] = await Promise.all([
-        buildMetrics(deliveryMetrics, deliveryQueueName),
-        buildMetrics(waMetrics, waInboundQueueName),
-        buildMetrics(paymentsMetrics, paymentsQueueName),
-      ]);
-      logger({ level: 'info', message: 'queue_metrics', delivery, wa, payments });
+      const snapshot = await Promise.all(trackedQueues.map(({ name, queue }) => buildMetrics(queue, name)));
+      logger({ level: 'info', message: 'queue_metrics', queues: snapshot });
     } catch (error) {
       logger({ level: 'error', message: 'queue_metrics_failed', error: error.message });
     }
@@ -818,11 +882,17 @@ function scheduleQueueMetrics() {
 }
 
 async function buildMetrics(queue, name) {
+  const completedCount = typeof queue.countCompleted === 'function' ? await queue.countCompleted() : 0;
+  const failedCount = typeof queue.countFailed === 'function' ? await queue.countFailed() : 0;
+  const deadLetterCount = typeof queue.countDeadLetter === 'function' ? await queue.countDeadLetter() : 0;
   return {
     name,
     waiting: await queue.countWaiting(),
     delayed: await queue.countDelayed(),
     active: await queue.countActive(),
+    completed: completedCount,
+    failed: failedCount,
+    deadLetter: deadLetterCount,
   };
 }
 

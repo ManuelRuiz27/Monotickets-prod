@@ -15,14 +15,37 @@ export async function createQueues(options = {}) {
     removeOnFail: false,
   };
 
-  const outboundQueueName = env.WA_OUTBOUND_QUEUE_NAME || env.DELIVERY_QUEUE_NAME || 'wa_outbound';
+  const whatsappQueueName =
+    env.WHATSAPP_QUEUE_NAME || env.WA_OUTBOUND_QUEUE_NAME || env.DELIVERY_QUEUE_NAME || 'queue:whatsapp';
+  const emailQueueName = env.EMAIL_QUEUE_NAME || 'queue:email';
+  const pdfQueueName = env.PDF_QUEUE_NAME || 'queue:pdf';
   const inboundQueueName = env.WA_INBOUND_QUEUE_NAME || 'wa_inbound';
-  const delivery = await createSimpleQueue(outboundQueueName, {
+  const failedQueueName = env.DELIVERY_FAILED_QUEUE_NAME || 'queue:delivery:failed';
+
+  const whatsapp = await createSimpleQueue(whatsappQueueName, {
     logger,
     connectionOptions,
     defaultJobOptions: {
       ...defaultJobOptions,
       attempts: Number(env.DELIVERY_MAX_RETRIES || defaultJobOptions.attempts),
+    },
+  });
+
+  const email = await createSimpleQueue(emailQueueName, {
+    logger,
+    connectionOptions,
+    defaultJobOptions: {
+      ...defaultJobOptions,
+      attempts: Number(env.EMAIL_MAX_RETRIES || 3),
+    },
+  });
+
+  const pdf = await createSimpleQueue(pdfQueueName, {
+    logger,
+    connectionOptions,
+    defaultJobOptions: {
+      ...defaultJobOptions,
+      attempts: Number(env.PDF_MAX_RETRIES || 3),
     },
   });
 
@@ -38,11 +61,25 @@ export async function createQueues(options = {}) {
     defaultJobOptions,
   });
 
+  const deliveryFailed = await createSimpleQueue(failedQueueName, {
+    logger,
+    connectionOptions,
+    defaultJobOptions,
+  });
+
   return {
-    deliveryQueue: delivery.queue,
-    deliveryEvents: delivery.events,
-    waOutboundQueue: delivery.queue,
-    waOutboundEvents: delivery.events,
+    whatsappQueue: whatsapp.queue,
+    whatsappEvents: whatsapp.events,
+    emailQueue: email.queue,
+    emailEvents: email.events,
+    pdfQueue: pdf.queue,
+    pdfEvents: pdf.events,
+    deliveryFailedQueue: deliveryFailed.queue,
+    deliveryFailedEvents: deliveryFailed.events,
+    deliveryQueue: whatsapp.queue,
+    deliveryEvents: whatsapp.events,
+    waOutboundQueue: whatsapp.queue,
+    waOutboundEvents: whatsapp.events,
     waInboundQueue: waInbound.queue,
     waInboundEvents: waInbound.events,
     paymentsQueue: payments.queue,

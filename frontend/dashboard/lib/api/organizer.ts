@@ -1,41 +1,34 @@
-export type EventStatus = 'draft' | 'live' | 'completed';
-export type ConfirmationState = 'pending' | 'confirmed' | 'scanned';
-export type LandingKind = 'standard' | 'premium';
+import type { GuestModel, GuestStatus, EventStatus, LandingKind } from '@shared/models/delivery';
+import { handleError } from '@shared/api/errors';
+
+export type { GuestStatus, EventStatus, LandingKind };
 
 export interface EventSummary {
   id: string;
   name: string;
-  start_date: string;
-  end_date?: string | null;
+  startsAt: string;
+  endsAt?: string | null;
   status: EventStatus;
   type: LandingKind;
-  landing_kind: LandingKind;
-  landing_ttl_days: number;
+  landingKind: LandingKind;
+  landingTtlDays: number;
 }
 
-export interface Guest {
-  id: string;
-  name: string;
-  email: string;
-  phone: string;
-  status: ConfirmationState;
-  confirmed_at?: string | null;
-  scanned_at?: string | null;
-  last_sent_at?: string | null;
-  confirmation_link?: string;
-}
+export interface Guest extends GuestModel {}
 
 export interface EventDetail extends EventSummary {
   description?: string;
   location?: string;
-  cover_url?: string;
-  pdf_url?: string;
-  flipbook_url?: string;
-  landing_url?: string;
-  gallery_urls?: string[];
+  coverUrl?: string | null;
+  pdfUrl?: string | null;
+  flipbookUrl?: string | null;
+  landingUrl?: string | null;
+  galleryUrls?: string[];
   metrics?: ConfirmationMetrics;
-  whatsapp_template?: string;
+  whatsappTemplate?: string;
 }
+
+export type ConfirmationState = GuestStatus;
 
 export interface ConfirmationMetrics {
   confirmationRate: number;
@@ -66,14 +59,14 @@ export interface CreateEventPayload {
   name: string;
   description?: string;
   location?: string;
-  start_date: string;
-  end_date?: string;
+  startsAt: string;
+  endsAt?: string;
   type: LandingKind;
-  cover_url?: string;
-  pdf_url?: string;
-  flipbook_url?: string;
-  landing_url?: string;
-  landing_ttl_days: number;
+  coverUrl?: string;
+  pdfUrl?: string;
+  flipbookUrl?: string;
+  landingUrl?: string;
+  landingTtlDays: number;
 }
 
 export interface GuestPayload {
@@ -102,38 +95,38 @@ const MOCK_EVENTS: EventDetail[] = [
     name: 'Gala Innovación 2024',
     description: 'Ceremonia principal con premiación y números musicales.',
     location: 'Auditorio Reforma · CDMX',
-    start_date: new Date(Date.now() + 1000 * 60 * 60 * 72).toISOString(),
-    end_date: new Date(Date.now() + 1000 * 60 * 60 * 76).toISOString(),
+    startsAt: new Date(Date.now() + 1000 * 60 * 60 * 72).toISOString(),
+    endsAt: new Date(Date.now() + 1000 * 60 * 60 * 76).toISOString(),
     status: 'live',
     type: 'premium',
-    landing_kind: 'premium',
-    landing_ttl_days: 120,
-    landing_url: '#',
+    landingKind: 'premium',
+    landingTtlDays: 120,
+    landingUrl: '#',
   },
   {
     id: 'evt-summit-pre',
     name: 'Summit Premium Riviera',
     description: 'Experiencia previa al summit con conferencias exclusivas.',
     location: 'Centro de Convenciones Riviera',
-    start_date: new Date(Date.now() + 1000 * 60 * 60 * 240).toISOString(),
+    startsAt: new Date(Date.now() + 1000 * 60 * 60 * 240).toISOString(),
     status: 'draft',
     type: 'standard',
-    landing_kind: 'standard',
-    landing_ttl_days: 90,
-    landing_url: '#',
+    landingKind: 'standard',
+    landingTtlDays: 90,
+    landingUrl: '#',
   },
   {
     id: 'evt-after-2023',
     name: 'After Office Backstage',
     description: 'Evento de agradecimiento para equipos y speakers.',
     location: 'Sala VIP Auditorio Reforma',
-    start_date: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
-    end_date: new Date(Date.now() - 1000 * 60 * 60 * 44).toISOString(),
+    startsAt: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
+    endsAt: new Date(Date.now() - 1000 * 60 * 60 * 44).toISOString(),
     status: 'completed',
     type: 'standard',
-    landing_kind: 'standard',
-    landing_ttl_days: 30,
-    landing_url: '#',
+    landingKind: 'standard',
+    landingTtlDays: 30,
+    landingUrl: '#',
   },
 ];
 
@@ -145,9 +138,9 @@ const MOCK_GUESTS: Record<string, Guest[]> = {
       email: 'ada@example.com',
       phone: '+52 55 1010 0001',
       status: 'confirmed',
-      confirmed_at: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
-      last_sent_at: new Date(Date.now() - 1000 * 60 * 60 * 6).toISOString(),
-      confirmation_link: '#',
+      confirmedAt: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
+      lastSentAt: new Date(Date.now() - 1000 * 60 * 60 * 6).toISOString(),
+      confirmationLink: '#',
     },
     {
       id: 'gst-grace',
@@ -155,8 +148,8 @@ const MOCK_GUESTS: Record<string, Guest[]> = {
       email: 'grace@example.com',
       phone: '+52 55 1010 0002',
       status: 'pending',
-      last_sent_at: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(),
-      confirmation_link: '#',
+      lastSentAt: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(),
+      confirmationLink: '#',
     },
     {
       id: 'gst-alan',
@@ -164,9 +157,9 @@ const MOCK_GUESTS: Record<string, Guest[]> = {
       email: 'alan@example.com',
       phone: '+52 55 1010 0003',
       status: 'scanned',
-      confirmed_at: new Date(Date.now() - 1000 * 60 * 60 * 10).toISOString(),
-      scanned_at: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
-      confirmation_link: '#',
+      confirmedAt: new Date(Date.now() - 1000 * 60 * 60 * 10).toISOString(),
+      scannedAt: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
+      confirmationLink: '#',
     },
   ],
   'evt-summit-pre': [],
@@ -189,8 +182,10 @@ async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise
       cache: 'no-store',
     });
     if (!res.ok) {
-      const detail = await res.text();
-      throw new Error(`Request failed: ${res.status} ${res.statusText} ${detail}`);
+      await handleError(res, {
+        scope: 'organizer-api',
+        request: typeof input === 'string' ? input : input.toString(),
+      });
     }
     return res.json() as Promise<T>;
   } catch (error) {
@@ -233,13 +228,13 @@ function mockRequest<T>(input: RequestInfo | URL, init?: RequestInit): T {
       name: payload.name ?? 'Nuevo evento',
       description: payload.description ?? '',
       location: payload.location ?? '',
-      start_date: payload.start_date ?? new Date().toISOString(),
-      end_date: payload.end_date ?? null,
+      startsAt: payload.startsAt ?? new Date().toISOString(),
+      endsAt: payload.endsAt ?? null,
       status: 'draft',
       type: payload.type ?? 'standard',
-      landing_kind: payload.landing_kind ?? payload.type ?? 'standard',
-      landing_ttl_days: payload.landing_ttl_days ?? 60,
-      landing_url: payload.landing_url ?? '#',
+      landingKind: payload.landingKind ?? payload.type ?? 'standard',
+      landingTtlDays: payload.landingTtlDays ?? 60,
+      landingUrl: payload.landingUrl ?? '#',
     };
     MOCK_EVENTS.unshift(newEvent);
     MOCK_GUESTS[id] = [];
@@ -281,8 +276,8 @@ function mockRequest<T>(input: RequestInfo | URL, init?: RequestInit): T {
       email: payload.email ?? 'demo@example.com',
       phone: payload.phone ?? '+52 55 0000 0000',
       status: 'pending',
-      last_sent_at: null,
-      confirmation_link: '#',
+      lastSentAt: null,
+      confirmationLink: '#',
     };
     (MOCK_GUESTS[eventId] ??= []).push(guest);
     return clone(guest) as T;

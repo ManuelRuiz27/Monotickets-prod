@@ -98,13 +98,59 @@ async function ensureDeliveryInfrastructure(logger) {
     CREATE TABLE IF NOT EXISTS delivery_provider_refs (
       provider_ref text PRIMARY KEY,
       request_id bigint NOT NULL REFERENCES delivery_requests(id) ON DELETE CASCADE,
+      guest_id uuid,
       attempt_id bigint,
       created_at timestamptz NOT NULL DEFAULT now()
     )
   `);
+  await query('ALTER TABLE delivery_provider_refs ADD COLUMN IF NOT EXISTS guest_id uuid');
   await query('CREATE INDEX IF NOT EXISTS idx_delivery_provider_request ON delivery_provider_refs(request_id)');
+  await query(
+    `
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+            FROM pg_indexes
+           WHERE schemaname = 'public'
+             AND tablename = 'delivery_provider_refs'
+             AND indexname = 'idx_delivery_provider_guest'
+        ) THEN
+          EXECUTE 'CREATE UNIQUE INDEX idx_delivery_provider_guest ON delivery_provider_refs(provider_ref, guest_id)';
+        END IF;
+      END
+      $$;
+    `,
+  );
 
   logger({ level: 'info', message: 'db_delivery_tables_ready' });
+}
+
+async function ensureLedgerTickets(logger) {
+  await query(`
+    CREATE TABLE IF NOT EXISTS ledger_tickets (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      organizer_id uuid NOT NULL,
+      event_id uuid,
+      tickets_assigned integer NOT NULL,
+      tickets_used integer NOT NULL DEFAULT 0,
+      tickets_type text NOT NULL,
+      unit_price_mxn numeric(12, 2) NOT NULL DEFAULT 0,
+      amount_due numeric(14, 2) NOT NULL DEFAULT 0,
+      paid boolean NOT NULL DEFAULT false,
+      payment_ref text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_ledger_tickets_organizer ON ledger_tickets(organizer_id, paid)
+  `);
+  await query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_tickets_payment_ref ON ledger_tickets(payment_ref)
+      WHERE payment_ref IS NOT NULL
+  `);
+  logger({ level: 'info', message: 'db_ledger_tickets_ready' });
 }
 
 async function convertLegacyDeliveryLogs(logger) {
@@ -454,5 +500,6 @@ export async function initializeDatabase(options = {}) {
   await ensureExtensions(logger);
   await ensureCoreTables(logger);
   await ensureDeliveryInfrastructure(logger);
+  await ensureLedgerTickets(logger);
   await seedBaselineData(logger);
 }

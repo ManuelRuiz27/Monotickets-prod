@@ -6,6 +6,7 @@ const ACTIONS = Object.freeze({
   DIRECTOR_OVERVIEW: 'director:overview',
   DIRECTOR_LEDGER: 'director:ledger',
   DIRECTOR_PAYMENTS: 'director:payments',
+  DIRECTOR_WEBHOOK: 'director:webhook',
   PAYMENTS_CREATE_INTENT: 'payments:createIntent',
   GUESTS_LIST: 'guests:list',
   EVENT_GUESTS_LIST: 'events:guests:list',
@@ -13,6 +14,16 @@ const ACTIONS = Object.freeze({
 });
 
 const ROLE_PERMISSIONS = new Map([
+  [
+    'director',
+    new Set([
+      ACTIONS.DIRECTOR_ASSIGN,
+      ACTIONS.DIRECTOR_OVERVIEW,
+      ACTIONS.DIRECTOR_LEDGER,
+      ACTIONS.DIRECTOR_PAYMENTS,
+      ACTIONS.DIRECTOR_WEBHOOK,
+    ]),
+  ],
   ['admin', new Set(['*'])],
   [
     'organizer',

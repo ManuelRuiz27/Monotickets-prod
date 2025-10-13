@@ -33,12 +33,12 @@ export function StepGeneral({ value, onChange }: StepGeneralProps) {
         Fecha y hora
         <input
           id="event-date"
-          name="start_date"
+          name="startsAt"
           type="datetime-local"
           required
           style={inputStyle}
-          value={value.start_date ?? ''}
-          onChange={(event) => onChange({ ...value, start_date: event.target.value })}
+          value={value.startsAt ?? ''}
+          onChange={(event) => onChange({ ...value, startsAt: event.target.value })}
         />
       </label>
       <label style={labelStyle} htmlFor="event-type">
@@ -58,12 +58,12 @@ export function StepGeneral({ value, onChange }: StepGeneralProps) {
         Días activos para la landing
         <input
           id="event-ttl"
-          name="landing_ttl_days"
+          name="landingTtlDays"
           type="number"
           min={1}
           style={inputStyle}
-          value={value.landing_ttl_days ?? 7}
-          onChange={(event) => onChange({ ...value, landing_ttl_days: Number(event.target.value) })}
+          value={value.landingTtlDays ?? 7}
+          onChange={(event) => onChange({ ...value, landingTtlDays: Number(event.target.value) })}
         />
       </label>
     </fieldset>
