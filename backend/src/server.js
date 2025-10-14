@@ -10,6 +10,7 @@ import {
 } from './auth/tokens.js';
 import { runMiddlewareStack } from './http/middleware.js';
 import { createJwtAuthMiddleware } from './auth/middleware.js';
+import { authenticateRequest } from './auth/authorization.js';
 import { RBAC, authorizeAction } from './auth/rbac.js';
 import { createLogger } from './logging.js';
 import { createQueues } from './queues/index.js';
@@ -104,6 +105,10 @@ export function createServer(options = {}) {
     createErrorInterceptor({ env, logger }),
     createJwtAuthMiddleware({ env, logger }),
   ];
+  const guestsRequireAuthFlag = String(env.GUESTS_REQUIRE_AUTH || '').toLowerCase();
+  const allowAnonymousGuestAccess = !['1', 'true', 'yes', 'on'].includes(guestsRequireAuthFlag);
+  const scanRequireAuthFlag = String(env.SCAN_REQUIRE_AUTH || '').toLowerCase();
+  const requireScanAuth = ['1', 'true', 'yes', 'on'].includes(scanRequireAuthFlag);
 
   attachQueueObservers(queuesPromise, logger, env);
 
@@ -129,7 +134,7 @@ export function createServer(options = {}) {
       requestId = middlewareContext.requestId;
       res.setHeader('x-request-id', requestId);
     }
-    const auth = middlewareContext.auth || { user: null, error: 'missing_token', token: null };
+    let auth = middlewareContext.auth || { user: null, error: 'missing_token', token: null };
     const clientFingerprint = getClientFingerprint(req);
     if (auth.user?.id) {
       requestContext.userId = auth.user.id;
@@ -214,6 +219,54 @@ export function createServer(options = {}) {
           requestId,
         });
         return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'POST' && url.pathname === '/wa/webhook') {
+        const rateKey = `ratelimit:wa:webhook:${clientFingerprint}`;
+        const webhookLimit = await enforceRateLimit({
+          env,
+          logger,
+          res,
+          key: rateKey,
+          limit: RATE_LIMIT_WEBHOOK,
+          windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+          requestId,
+          path: url.pathname,
+        });
+
+        if (!webhookLimit.allowed) {
+          return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
+        }
+
+        const body = await readJsonBody(req, logger);
+        try {
+          const queues = await queuesPromise;
+          const payload = typeof body === 'object' && body !== null ? body : {};
+          const job = queues.waInboundQueue
+            ? await queues.waInboundQueue.add('wa:webhook', {
+                payload,
+                receivedAt: new Date().toISOString(),
+                requestId,
+              })
+            : null;
+
+          return sendJson(res, 200, {
+            status: 'accepted',
+            requestId,
+            jobId: job?.id ?? null,
+          });
+        } catch (error) {
+          log(
+            {
+              level: 'error',
+              message: 'wa_webhook_enqueue_failed',
+              error: error.message,
+              request_id: requestId,
+            },
+            { logger },
+          );
+          return sendJson(res, 500, { error: 'webhook_enqueue_failed', requestId });
+        }
       }
 
       if (method === 'GET' && /^\/deliver\/.+\/status$/.test(url.pathname)) {
@@ -708,25 +761,45 @@ export function createServer(options = {}) {
       }
 
       if (method === 'GET' && url.pathname === '/guests') {
-        if (!requireAction({
-          auth,
-          action: RBAC.ACTIONS.GUESTS_LIST,
-          res,
-          requestId,
-          logger,
-          path: url.pathname,
-        })) {
-          return;
-        }
         const eventIdParam = url.searchParams.get('eventId');
-        const { eventExists, guests } = await fetchGuests({
+        if (!allowAnonymousGuestAccess) {
+          if (
+            !requireAction({
+              auth,
+              action: RBAC.ACTIONS.GUESTS_LIST,
+              res,
+              requestId,
+              logger,
+              path: url.pathname,
+            })
+          ) {
+            return;
+          }
+        } else if (!auth.user) {
+          log(
+            {
+              level: 'debug',
+              message: 'guest_list_public_access',
+              path: url.pathname,
+              request_id: requestId,
+            },
+            { logger },
+          );
+        }
+        const guestsResult = await fetchGuests({
           eventId: eventIdParam ?? undefined,
           limit: DEFAULT_GUEST_LIST_LIMIT,
+          env,
+          logger,
         });
-        if (eventIdParam && !eventExists) {
+        if (eventIdParam && !guestsResult.eventExists) {
           return sendJson(res, 404, { error: 'event_not_found', requestId });
         }
-        return sendJson(res, 200, { guests });
+        const payload = { guests: guestsResult.guests };
+        if (guestsResult.resolvedEventId) {
+          payload.resolvedEventId = guestsResult.resolvedEventId;
+        }
+        return sendJson(res, 200, payload);
       }
 
       if (
@@ -734,37 +807,140 @@ export function createServer(options = {}) {
         url.pathname.startsWith('/events/') &&
         url.pathname.endsWith('/guests')
       ) {
-        if (!requireAction({
-          auth,
-          action: RBAC.ACTIONS.EVENT_GUESTS_LIST,
-          res,
-          requestId,
-          logger,
-          path: url.pathname,
-        })) {
-          return;
+        if (!allowAnonymousGuestAccess) {
+          if (
+            !requireAction({
+              auth,
+              action: RBAC.ACTIONS.EVENT_GUESTS_LIST,
+              res,
+              requestId,
+              logger,
+              path: url.pathname,
+            })
+          ) {
+            return;
+          }
+        } else if (!auth.user) {
+          log(
+            {
+              level: 'debug',
+              message: 'guest_event_public_access',
+              path: url.pathname,
+              request_id: requestId,
+            },
+            { logger },
+          );
         }
-        const [, , eventId] = url.pathname.split('/');
-        const { eventExists, guests } = await fetchGuests({ eventId, limit: DEFAULT_GUEST_LIST_LIMIT });
-        if (!eventExists) {
+        const [, , requestedEventId] = url.pathname.split('/');
+        const guestsResult = await fetchGuests({
+          eventId: requestedEventId,
+          limit: DEFAULT_GUEST_LIST_LIMIT,
+          env,
+          logger,
+        });
+        if (!guestsResult.eventExists) {
           return sendJson(res, 404, { error: 'event_not_found', requestId });
         }
-        return sendJson(res, 200, { eventId, guests });
+        const payload = { eventId: requestedEventId, guests: guestsResult.guests };
+        if (guestsResult.resolvedEventId) {
+          payload.resolvedEventId = guestsResult.resolvedEventId;
+        }
+        return sendJson(res, 200, payload);
       }
 
       if (method === 'POST' && url.pathname === '/scan/validate') {
-        if (!requireAction({
-          auth,
-          action: RBAC.ACTIONS.SCAN_VALIDATE,
-          res,
-          requestId,
-          logger,
-          path: url.pathname,
-        })) {
-          return;
+        const body = await readJsonBody(req, logger);
+        const fallbackToken = typeof body.staffToken === 'string' ? body.staffToken.trim() : '';
+
+        if ((!auth.user || auth.error) && fallbackToken) {
+          const fallbackAuth = authenticateRequest({
+            headers: { authorization: `Bearer ${fallbackToken}` },
+            env,
+          });
+          if (fallbackAuth.user) {
+            auth = fallbackAuth;
+            middlewareContext.auth = fallbackAuth;
+            log(
+              {
+                level: 'debug',
+                message: 'scan_auth_fallback_applied',
+                request_id: requestId,
+                user_role: fallbackAuth.user.role,
+              },
+              { logger },
+            );
+          } else if (requireScanAuth) {
+            log(
+              {
+                level: 'warn',
+                message: 'scan_auth_fallback_failed',
+                request_id: requestId,
+                reason: fallbackAuth.error || 'invalid_token',
+              },
+              { logger },
+            );
+          } else {
+            log(
+              {
+                level: 'debug',
+                message: 'scan_auth_fallback_ignored',
+                request_id: requestId,
+                reason: fallbackAuth.error || 'invalid_token',
+              },
+              { logger },
+            );
+          }
         }
 
-        const rateKey = `ratelimit:scan:${clientFingerprint}:${auth.user?.id ?? 'anonymous'}`;
+        if (requireScanAuth) {
+          if (
+            !requireAction({
+              auth,
+              action: RBAC.ACTIONS.SCAN_VALIDATE,
+              res,
+              requestId,
+              logger,
+              path: url.pathname,
+            })
+          ) {
+            return;
+          }
+        } else if (!auth.user) {
+          log(
+            {
+              level: 'debug',
+              message: 'scan_public_access',
+              path: url.pathname,
+              request_id: requestId,
+            },
+            { logger },
+          );
+        }
+
+        const code = typeof body.code === 'string' ? body.code.trim() : '';
+        const rawEventId = typeof body.eventId === 'string' ? body.eventId.trim() : '';
+        requestContext.eventId = rawEventId || undefined;
+
+        if (!code || !rawEventId) {
+          return sendJson(res, 400, { error: 'code_and_event_required', requestId });
+        }
+
+        const eventResolution = await resolveEventIdentifier({ eventId: rawEventId, env, logger });
+        if (!eventResolution.exists || !eventResolution.resolvedEventId) {
+          return sendJson(res, 404, { error: 'event_not_found', requestId });
+        }
+
+        const resolvedEventId = eventResolution.resolvedEventId;
+        requestContext.eventId = resolvedEventId;
+
+        const rateKey = [
+          'ratelimit',
+          'scan',
+          resolvedEventId,
+          clientFingerprint,
+          auth.user?.id ?? 'anonymous',
+        ].join(':');
+
         const scanLimit = await enforceRateLimit({
           env,
           logger,
@@ -780,21 +956,12 @@ export function createServer(options = {}) {
           return sendJson(res, 429, { error: 'rate_limit_exceeded', requestId });
         }
 
-        const body = await readJsonBody(req, logger);
-        const code = typeof body.code === 'string' ? body.code.trim() : '';
-        const eventId = typeof body.eventId === 'string' ? body.eventId.trim() : '';
-        requestContext.eventId = eventId || undefined;
-
-        if (!code || !eventId) {
-          return sendJson(res, 400, { error: 'code_and_event_required', requestId });
-        }
-
         const redis = await ensureRedis({ name: 'scan-locks', env, logger });
         const idempotencyKey = getIdempotencyKey(req.headers);
         let idempotencyCacheKey;
 
         if (idempotencyKey) {
-          idempotencyCacheKey = `scan:idempotency:${eventId}:${idempotencyKey}`;
+          idempotencyCacheKey = `scan:idempotency:${resolvedEventId}:${idempotencyKey}`;
           const cachedRaw = await redis.get(idempotencyCacheKey);
           if (cachedRaw) {
             try {
@@ -812,7 +979,7 @@ export function createServer(options = {}) {
         }
 
         const lockToken = randomUUID();
-        const lockKey = `scan:lock:${eventId}:${code}`;
+        const lockKey = `scan:lock:${resolvedEventId}:${code}`;
         const lockTtlMs = Number(env.SCAN_LOCK_TTL_MS || 1500);
         const lockResult = await redis.set(lockKey, lockToken, 'NX', 'PX', lockTtlMs);
         if (lockResult !== 'OK') {
@@ -837,11 +1004,11 @@ export function createServer(options = {}) {
                JOIN guests ON guests.id = invites.guest_id
               WHERE invites.code = $1 AND invites.event_id = $2
               LIMIT 1`,
-            [code, eventId],
+            [code, resolvedEventId],
           );
 
           if (inviteResult.rowCount === 0) {
-            await appendScanLog({ eventId, guestId: null, result: 'invalid', device: body.device });
+            await appendScanLog({ eventId: resolvedEventId, guestId: null, result: 'invalid', device: body.device });
             const responseBody = { error: 'invite_not_found', status: 'invalid', requestId };
             if (idempotencyCacheKey) {
               await cacheIdempotentResponse({
@@ -858,7 +1025,12 @@ export function createServer(options = {}) {
 
           const invite = inviteResult.rows[0];
           if (!['confirmed', 'scanned'].includes(invite.status)) {
-            await appendScanLog({ eventId, guestId: invite.guest_id, result: 'invalid', device: body.device });
+            await appendScanLog({
+              eventId: resolvedEventId,
+              guestId: invite.guest_id,
+              result: 'invalid',
+              device: body.device,
+            });
             const responseBody = { error: 'guest_not_confirmed', status: 'invalid', requestId };
             if (idempotencyCacheKey) {
               await cacheIdempotentResponse({
@@ -874,7 +1046,12 @@ export function createServer(options = {}) {
           }
 
           if (invite.status === 'scanned') {
-            await appendScanLog({ eventId, guestId: invite.guest_id, result: 'duplicate', device: body.device });
+            await appendScanLog({
+              eventId: resolvedEventId,
+              guestId: invite.guest_id,
+              result: 'duplicate',
+              device: body.device,
+            });
             const responseBody = { status: 'duplicate', duplicate: true, requestId };
             if (idempotencyCacheKey) {
               await cacheIdempotentResponse({
@@ -898,7 +1075,12 @@ export function createServer(options = {}) {
           );
 
           const finalStatus = updateResult.rowCount > 0 ? 'valid' : 'duplicate';
-          await appendScanLog({ eventId, guestId: invite.guest_id, result: finalStatus === 'valid' ? 'valid' : 'duplicate', device: body.device });
+          await appendScanLog({
+            eventId: resolvedEventId,
+            guestId: invite.guest_id,
+            result: finalStatus === 'valid' ? 'valid' : 'duplicate',
+            device: body.device,
+          });
 
           const responseBody =
             finalStatus === 'valid'
@@ -1185,13 +1367,77 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchGuests({ eventId, limit = DEFAULT_GUEST_LIST_LIMIT }) {
+async function resolveEventIdentifier({ eventId, env = process.env, logger = defaultLogger }) {
+  if (!eventId) {
+    return { resolvedEventId: undefined, exists: true, aliasUsed: false };
+  }
+
+  const trimmed = String(eventId).trim();
+  if (!trimmed) {
+    return { resolvedEventId: undefined, exists: true, aliasUsed: false };
+  }
+
+  const aliases = String(env.EVENT_ID_ALIASES || env.DEMO_EVENT_ALIAS || 'demo-event')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const normalized = trimmed.toLowerCase();
+
+  if (aliases.includes(normalized)) {
+    let aliasTarget = await query(
+      `SELECT id
+         FROM events
+        WHERE status = 'active'
+        ORDER BY created_at ASC
+        LIMIT 1`,
+    );
+
+    if (aliasTarget.rowCount === 0) {
+      aliasTarget = await query(
+        `SELECT id
+           FROM events
+          ORDER BY created_at ASC
+          LIMIT 1`,
+      );
+    }
+
+    if (aliasTarget.rowCount === 0) {
+      return { resolvedEventId: null, exists: false, aliasUsed: true };
+    }
+
+    const resolvedId = aliasTarget.rows[0].id;
+    log(
+      {
+        level: 'debug',
+        message: 'event_alias_resolved',
+        alias: trimmed,
+        resolved_event_id: resolvedId,
+      },
+      { logger },
+    );
+    return { resolvedEventId: resolvedId, exists: true, aliasUsed: true };
+  }
+
+  const eventResult = await query('SELECT id FROM events WHERE id = $1 LIMIT 1', [trimmed]);
+  if (eventResult.rowCount === 0) {
+    return { resolvedEventId: null, exists: false, aliasUsed: false };
+  }
+
+  return { resolvedEventId: eventResult.rows[0].id, exists: true, aliasUsed: false };
+}
+
+async function fetchGuests({ eventId, limit = DEFAULT_GUEST_LIST_LIMIT, env = process.env, logger = defaultLogger }) {
   let eventExists = true;
+  let resolvedEventId;
+  let aliasUsed = false;
+
   if (eventId) {
-    const eventResult = await query('SELECT id FROM events WHERE id = $1 LIMIT 1', [eventId]);
-    if (eventResult.rowCount === 0) {
+    const resolution = await resolveEventIdentifier({ eventId, env, logger });
+    resolvedEventId = resolution.resolvedEventId ?? undefined;
+    aliasUsed = resolution.aliasUsed;
+    if (!resolution.exists) {
       eventExists = false;
-      return { eventExists, guests: [] };
+      return { eventExists, guests: [], resolvedEventId: null, aliasUsed };
     }
   }
 
@@ -1201,14 +1447,14 @@ async function fetchGuests({ eventId, limit = DEFAULT_GUEST_LIST_LIMIT }) {
       FROM guests
   `;
 
-  if (eventId) {
-    params.push(eventId);
+  if (resolvedEventId) {
+    params.push(resolvedEventId);
     sql += ' WHERE event_id = $1';
   }
 
   sql += ' ORDER BY created_at DESC';
 
-  if (!eventId) {
+  if (!resolvedEventId) {
     params.push(limit);
     sql += ` LIMIT $${params.length}`;
   }
@@ -1223,7 +1469,24 @@ async function fetchGuests({ eventId, limit = DEFAULT_GUEST_LIST_LIMIT }) {
     checkedIn: row.status === 'scanned',
   }));
 
-  return { eventExists, guests };
+  if (aliasUsed) {
+    log(
+      {
+        level: 'debug',
+        message: 'guest_list_alias_served',
+        alias: eventId,
+        resolved_event_id: resolvedEventId,
+      },
+      { logger },
+    );
+  }
+
+  return {
+    eventExists,
+    guests,
+    resolvedEventId: resolvedEventId ?? null,
+    aliasUsed,
+  };
 }
 
 function getIdempotencyKey(headers = {}) {

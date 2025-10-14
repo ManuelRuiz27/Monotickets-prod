@@ -348,20 +348,73 @@ async function ensureDeliveryPartitions(logger) {
 }
 
 async function seedBaselineData(logger) {
-  const existingEvents = await query('SELECT id FROM events LIMIT 1');
-  if (existingEvents.rowCount > 0) {
-    return;
+  const validInviteCode = process.env.SCAN_QR_VALID || 'MONO-QR-0001';
+  const duplicateInviteCode = process.env.SCAN_QR_DUP || 'MONO-QR-0001-DUP';
+  const expiredInviteCode = process.env.SCAN_QR_EXPIRED || 'MONO-QR-ARCHIVED';
+  const demoEventName = 'Demo Experience';
+
+  let baseEvent = await query(
+    `
+      SELECT id, organizer_id
+        FROM events
+       WHERE name = $1
+       LIMIT 1
+    `,
+    [demoEventName],
+  );
+
+  if (baseEvent.rowCount === 0) {
+    baseEvent = await query(
+      `
+        SELECT id, organizer_id
+          FROM events
+         ORDER BY created_at ASC
+         LIMIT 1
+      `,
+    );
   }
 
-  const eventResult = await query(
-    `
-      INSERT INTO events (name, status, starts_at, ends_at)
-      VALUES ($1, $2, now() - interval '1 hour', now() + interval '5 hours')
-      RETURNING id
-    `,
-    ['Demo Experience', 'active'],
-  );
-  const eventId = eventResult.rows[0].id;
+  let eventId;
+  if (baseEvent.rowCount === 0) {
+    const organizerResult = await query(
+      `
+        INSERT INTO organizers (name)
+        VALUES ($1)
+        RETURNING id
+      `,
+      ['Seed Organizer'],
+    );
+    const organizerId = organizerResult.rows[0].id;
+    const eventResult = await query(
+      `
+        INSERT INTO events (organizer_id, name, type, status, landing_ttl_days, starts_at, ends_at)
+        VALUES ($1, $2, 'standard', 'active', $3, now() - interval '1 hour', now() + interval '5 hours')
+        RETURNING id
+      `,
+      [organizerId, demoEventName, Number(process.env.LANDING_TTL_DEFAULT_DAYS || 180)],
+    );
+    eventId = eventResult.rows[0].id;
+    logger({ level: 'info', message: 'db_seed_event_created', event_id: eventId });
+  } else {
+    eventId = baseEvent.rows[0].id;
+    await query(
+      `
+        UPDATE events
+           SET name = $2,
+               status = 'active',
+               type = COALESCE(type, 'standard'),
+               landing_ttl_days = COALESCE(landing_ttl_days, $3),
+               starts_at = now() - interval '1 hour',
+               ends_at = now() + interval '5 hours'
+         WHERE id = $1
+      `,
+      [eventId, demoEventName, Number(process.env.LANDING_TTL_DEFAULT_DAYS || 180)],
+    );
+    await query('DELETE FROM delivery_requests WHERE event_id = $1', [eventId]);
+    await query('DELETE FROM scan_logs WHERE event_id = $1', [eventId]);
+    await query('DELETE FROM guests WHERE event_id = $1', [eventId]);
+    logger({ level: 'info', message: 'db_seed_event_reset', event_id: eventId });
+  }
 
   const guestRows = await query(
     `
@@ -402,11 +455,11 @@ async function seedBaselineData(logger) {
     [
       eventId,
       guestsByStatus.confirmed.id,
-      'VALID123',
+      validInviteCode,
       guestsByStatus.pending.id,
-      'PENDING123',
+      expiredInviteCode,
       guestsByStatus.scanned.id,
-      'SCANNED123',
+      duplicateInviteCode,
     ],
   );
 

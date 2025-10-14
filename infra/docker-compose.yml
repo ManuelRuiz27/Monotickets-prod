@@ -60,7 +60,9 @@ services:
     ports:
       - "8080:8080"
     networks:
-      - monotickets_net
+      monotickets_net:
+        aliases:
+          - backend
     volumes:
       - uploads_local:/app/uploads
       - pdfs_local:/app/storage/pdfs
@@ -113,7 +115,9 @@ services:
     ports:
       - "${PWA_PORT:-3000}:${PWA_PORT:-3000}"
     networks:
-      - monotickets_net
+      monotickets_net:
+        aliases:
+          - frontend
     healthcheck:
       test:
         ["CMD", "node", "-e", "fetch('http://localhost:${PWA_PORT:-3000}/').then(r=>{if(r.status!==200)process.exit(1);}).catch(()=>process.exit(1));"]
