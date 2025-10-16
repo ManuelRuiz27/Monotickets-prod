@@ -51,70 +51,9 @@ async function ensureCoreTables(logger) {
     )
   `);
 
-  await query(`
-    CREATE TABLE IF NOT EXISTS merchants (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      nombre text NOT NULL,
-      categoria text NOT NULL,
-      municipio text NOT NULL,
-      descuento integer NOT NULL DEFAULT 0,
-      direccion text NOT NULL,
-      horario text NOT NULL,
-      descripcion text,
-      lat double precision,
-      lng double precision,
-      activo boolean NOT NULL DEFAULT true,
-      created_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now()
-    )
-  `);
-
-  await query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      curp text NOT NULL UNIQUE,
-      status text NOT NULL DEFAULT 'pending',
-      last_login_at timestamptz,
-      created_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now()
-    )
-  `);
-
-  await query(`
-    CREATE TABLE IF NOT EXISTS push_subscriptions (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      endpoint text NOT NULL,
-      p256dh text NOT NULL,
-      auth text NOT NULL,
-      created_at timestamptz NOT NULL DEFAULT now(),
-      deleted_at timestamptz,
-      UNIQUE (user_id, endpoint)
-    )
-  `);
-
-  await query(`
-    CREATE TABLE IF NOT EXISTS user_refresh_tokens (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      token_id uuid NOT NULL UNIQUE,
-      ip_address text,
-      user_agent text,
-      expires_at timestamptz NOT NULL,
-      revoked_at timestamptz,
-      created_at timestamptz NOT NULL DEFAULT now()
-    )
-  `);
-
-  await query('CREATE INDEX IF NOT EXISTS idx_user_refresh_tokens_user ON user_refresh_tokens(user_id)');
-  await query('CREATE INDEX IF NOT EXISTS idx_user_refresh_tokens_expires_at ON user_refresh_tokens(expires_at)');
-
   await query('CREATE INDEX IF NOT EXISTS idx_invites_event_code ON invites(event_id, code)');
   await query('CREATE INDEX IF NOT EXISTS idx_guests_event_status ON guests(event_id, status)');
   await query('CREATE INDEX IF NOT EXISTS idx_scan_logs_event_created_at ON scan_logs(event_id, created_at DESC)');
-  await query('CREATE INDEX IF NOT EXISTS idx_merchants_categoria ON merchants(categoria)');
-  await query('CREATE INDEX IF NOT EXISTS idx_merchants_municipio ON merchants(municipio)');
-  await query('CREATE INDEX IF NOT EXISTS idx_merchants_nombre ON merchants(nombre)');
 
   logger({ level: 'info', message: 'db_core_tables_ready' });
 }
@@ -615,20 +554,5 @@ export async function initializeDatabase(options = {}) {
   await ensureCoreTables(logger);
   await ensureDeliveryInfrastructure(logger);
   await ensureLedgerTickets(logger);
-  if (!shouldSkipSeeding(env)) {
-    await seedBaselineData(logger);
-  }
-}
-
-function shouldSkipSeeding(env = process.env) {
-  const explicitSkip = String(env.DB_SKIP_SEED || '').toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(explicitSkip)) {
-    return true;
-  }
-  const driver = String(env.DB_DRIVER || '').toLowerCase();
-  if (driver === 'memory') {
-    return true;
-  }
-  const url = String(env.DATABASE_URL || '').toLowerCase();
-  return url.startsWith('memory://');
+  await seedBaselineData(logger);
 }
