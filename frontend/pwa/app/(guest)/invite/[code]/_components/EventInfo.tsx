@@ -1,15 +1,21 @@
-import type React from 'react';
+'use client';
+
+import * as React from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import type {
   EventSummary,
   GuestSummary,
+  GuestStatus,
   InviteTemplateKind,
   TemplateLinks,
 } from '@/lib/api/guest';
+import { confirmAttendance } from '@/lib/api/guest';
 import { withThemeClassName } from '@/lib/theme/overrides';
 import { CalendarCTA } from './CalendarCTA';
 
 interface EventInfoProps {
+  code: string;
   event: EventSummary;
   guest: GuestSummary;
   template: InviteTemplateKind;
@@ -17,10 +23,43 @@ interface EventInfoProps {
   qrHref: string;
 }
 
-export function EventInfo({ event, guest, template, templateLinks, qrHref }: EventInfoProps) {
+export function EventInfo({ code, event, guest, template, templateLinks, qrHref }: EventInfoProps) {
   const pdfUrl = templateLinks?.pdfUrl;
   const flipbookUrl = templateLinks?.flipbookUrl;
   const thumbnailUrl = templateLinks?.thumbnailUrl;
+  const router = useRouter();
+  const [status, setStatus] = React.useState<GuestStatus>(guest.status);
+  const [isConfirming, setIsConfirming] = React.useState(false);
+  const [feedback, setFeedback] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    setStatus(guest.status);
+  }, [guest.status, code]);
+
+  const handleConfirm = async () => {
+    if (status !== 'pending') {
+      return;
+    }
+    setIsConfirming(true);
+    setError(null);
+    setFeedback(null);
+    try {
+      const response = await confirmAttendance(code);
+      const nextStatus = response.status ?? 'confirmed';
+      setStatus(nextStatus);
+      setFeedback('¡Listo! Tu asistencia fue confirmada. Te llevamos a tu código QR.');
+      router.push(response.redirectUrl ?? qrHref);
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'No pudimos confirmar tu asistencia. Intenta nuevamente en unos minutos.';
+      setError(message);
+    } finally {
+      setIsConfirming(false);
+    }
+  };
 
   return (
     <main className={withThemeClassName('invite-details')} style={containerStyle}>
@@ -89,16 +128,49 @@ export function EventInfo({ event, guest, template, templateLinks, qrHref }: Eve
         )}
       </section>
       <section style={{ ...sectionStyle, display: 'flex', flexDirection: 'column', gap: '16px' }}>
-        <a
-          href={guest.confirmationUrl}
-          style={confirmButtonStyle}
-          aria-label="Confirmar asistencia"
+        <p style={helperTextStyle}>
+          {status === 'pending'
+            ? 'Confirma tu asistencia para activar tu acceso digital. El código QR se mostrará automáticamente.'
+            : 'Gracias por confirmar. Puedes acceder al QR cuando lo necesites.'}
+        </p>
+        <button
+          type="button"
+          onClick={handleConfirm}
+          style={{
+            ...confirmButtonStyle,
+            opacity: isConfirming ? 0.75 : 1,
+            cursor: isConfirming ? 'wait' : status === 'pending' ? 'pointer' : 'not-allowed',
+          }}
+          aria-disabled={status !== 'pending'}
+          disabled={isConfirming || status !== 'pending'}
         >
-          Confirmar asistencia
-        </a>
-        <Link href={qrHref} prefetch={false} style={secondaryButtonStyle}>
+          {status === 'pending' ? 'Confirmar asistencia' : 'Asistencia confirmada'}
+        </button>
+        <Link
+          href={qrHref}
+          prefetch={false}
+          style={{
+            ...secondaryButtonStyle,
+            opacity: status === 'pending' ? 0.65 : 1,
+            pointerEvents: status === 'pending' ? 'none' : 'auto',
+            cursor: status === 'pending' ? 'not-allowed' : 'pointer',
+          }}
+          aria-disabled={status === 'pending'}
+          tabIndex={status === 'pending' ? -1 : undefined}
+        >
           Ver QR de acceso
         </Link>
+        <div aria-live="polite" style={visuallyHidden}>
+          {feedback}
+        </div>
+        {feedback && (
+          <p style={successTextStyle}>{feedback}</p>
+        )}
+        {error && (
+          <p role="alert" style={errorTextStyle}>
+            {error}
+          </p>
+        )}
       </section>
     </main>
   );
@@ -232,6 +304,20 @@ const helperTextStyle: React.CSSProperties = {
   color: 'rgba(13,27,42,0.65)',
 };
 
+const errorTextStyle: React.CSSProperties = {
+  fontFamily: 'var(--guest-font-body)',
+  fontSize: '0.95rem',
+  color: '#b91c1c',
+  margin: 0,
+};
+
+const successTextStyle: React.CSSProperties = {
+  fontFamily: 'var(--guest-font-body)',
+  fontSize: '0.95rem',
+  color: 'var(--guest-color-primary)',
+  margin: 0,
+};
+
 const pdfContainerStyle: React.CSSProperties = {
   borderRadius: '16px',
   overflow: 'hidden',
@@ -279,4 +365,15 @@ const secondaryButtonStyle: React.CSSProperties = {
   fontFamily: 'var(--guest-font-heading)',
   fontWeight: 600,
   textDecoration: 'none',
+};
+
+const visuallyHidden: React.CSSProperties = {
+  position: 'absolute',
+  width: '1px',
+  height: '1px',
+  padding: 0,
+  margin: '-1px',
+  overflow: 'hidden',
+  clip: 'rect(0, 0, 0, 0)',
+  border: 0,
 };

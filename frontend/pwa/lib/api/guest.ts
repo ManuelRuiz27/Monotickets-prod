@@ -178,39 +178,78 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 function mockRequest<T>(path: string, init?: RequestInit): T {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   const url = new URL(normalizedPath, 'https://mock.monotickets.local');
-  const [, resource, invitesSegment, codeSegment, extra] = url.pathname.split('/');
-  if (resource !== 'guest' || invitesSegment !== 'invites' || !codeSegment) {
+  const segments = url.pathname.split('/').filter(Boolean);
+
+  if (segments[0] === 'public') {
+    segments.shift();
+  }
+
+  if (segments[0] === 'guest' && segments[1] === 'invites') {
+    // Compatibilidad con rutas anteriores
+    segments.shift();
+    segments.shift();
+    segments.unshift('invite');
+  }
+
+  const [resource, codeSegment, extra] = segments;
+
+  if (!resource || !codeSegment) {
     throw new Error(`Mock API: ruta no soportada (${path})`);
   }
-  const code = decodeURIComponent(codeSegment);
-  const invite = FALLBACK_INVITES[code];
-  if (!invite) {
-    throw new Error(`Mock API: invitación ${code} no encontrada`);
+
+  if (resource === 'invite') {
+    const code = decodeURIComponent(codeSegment);
+    const invite = FALLBACK_INVITES[code];
+    if (!invite) {
+      throw new Error(`Mock API: invitación ${code} no encontrada`);
+    }
+
+    if (!extra) {
+      return deepClone(invite) as T;
+    }
+
+    if (extra === 'qr') {
+      return {
+        status: invite.guest.status,
+        qr: invite.qr,
+      } as T;
+    }
   }
 
-  if (!extra) {
-    return deepClone(invite) as T;
-  }
+  if (resource === 'confirm') {
+    const code = decodeURIComponent(codeSegment);
+    const invite = FALLBACK_INVITES[code];
+    if (!invite) {
+      throw new Error(`Mock API: invitación ${code} no encontrada`);
+    }
 
-  if (extra === 'confirm') {
-    return {
-      status: 'confirmed',
-      redirectUrl: `/invite/${code}/qr`,
-    } as T;
-  }
+    if (init?.method === 'POST' || init?.method === 'PUT' || init?.method === 'PATCH') {
+      invite.guest.status = 'confirmed';
+      invite.qr =
+        invite.qr ??
+        ({
+          imageUrl: QR_PLACEHOLDER,
+          altText: 'QR confirmado',
+        } as InviteResponse['qr']);
 
-  if (extra === 'qr') {
+      return {
+        status: 'confirmed',
+        redirectUrl: `/invite/${code}/qr`,
+        qr: invite.qr,
+      } as T;
+    }
+
     return {
       status: invite.guest.status,
       qr: invite.qr,
     } as T;
   }
 
-  throw new Error(`Mock API: recurso ${extra} no soportado`);
+  throw new Error(`Mock API: recurso ${segments.join('/')} no soportado`);
 }
 
 export function getInvite(code: string) {
-  return request<InviteResponse>(`/guest/invites/${encodeURIComponent(code)}`);
+  return request<InviteResponse>(`/public/invite/${encodeURIComponent(code)}`);
 }
 
 export async function getInviteLanding(code: string) {
@@ -228,19 +267,30 @@ export async function getLandingKind(code: string) {
   return invite.template;
 }
 
-export function confirmAttendance(code: string) {
-  return request<{ status: GuestStatus; redirectUrl?: string }>(
-    `/guest/invites/${encodeURIComponent(code)}/confirm`,
-    {
-      method: 'POST',
-    }
-  );
+export async function confirmAttendance(code: string) {
+  try {
+    return await request<{ status: GuestStatus; redirectUrl?: string; qr?: InviteResponse['qr'] }>(
+      `/public/confirm/${encodeURIComponent(code)}`,
+      {
+        method: 'POST',
+      }
+    );
+  } catch (error) {
+    return request<{ status: GuestStatus; redirectUrl?: string; qr?: InviteResponse['qr'] }>(
+      `/public/confirm/${encodeURIComponent(code)}`
+    );
+  }
 }
 
-export function getInviteQr(code: string) {
-  return request<{ status: GuestStatus; qr?: InviteResponse['qr'] }>(
-    `/guest/invites/${encodeURIComponent(code)}/qr`
-  );
+export async function getInviteQr(code: string) {
+  try {
+    return await request<{ status: GuestStatus; qr?: InviteResponse['qr'] }>(
+      `/public/invite/${encodeURIComponent(code)}/qr`
+    );
+  } catch (error) {
+    const invite = await getInvite(code);
+    return { status: invite.guest.status, qr: invite.qr };
+  }
 }
 
 function deepClone<T>(value: T): T {
