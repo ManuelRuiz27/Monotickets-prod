@@ -19,6 +19,7 @@ export default async function InviteDetailsPage({ params }: PageProps) {
   return (
     <div style={{ ...surfaceBase, ...themeToStyle(invite.theme) }}>
       <EventInfo
+        code={invite.code}
         event={invite.event}
         guest={invite.guest}
         template={invite.template}
