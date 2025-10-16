@@ -6,13 +6,12 @@ CREATE TABLE IF NOT EXISTS scan_logs (
     guest_id uuid NOT NULL,
     staff_id uuid,
     result text NOT NULL CHECK (result IN ('valid', 'duplicate', 'invalid')),
-    ts timestamptz NOT NULL DEFAULT now(),
-    created_at timestamptz GENERATED ALWAYS AS (ts) STORED,
+    ts timestamptz NOT NULL,
     device jsonb,
     PRIMARY KEY (id, ts)
 ) PARTITION BY RANGE (ts);
 
--- Particiones mensuales para el mes anterior y el actual.
+-- Particiones mensuales con formato scan_logs_YYYYMM.
 DO $$
 DECLARE
     month_start date;
@@ -36,20 +35,7 @@ BEGIN
     END LOOP;
 END $$;
 
--- Helper para preparar la partición del siguiente mes (ejecutar cercano al fin de mes).
--- DO $$
--- DECLARE
---     next_month date := date_trunc('month', current_date + interval '1 month')::date;
--- BEGIN
---     EXECUTE format(
---         'CREATE TABLE IF NOT EXISTS %I PARTITION OF scan_logs FOR VALUES FROM (%L) TO (%L);',
---         format('scan_logs_%s', to_char(next_month, 'YYYYMM')),
---         next_month,
---         next_month + interval '1 month'
---     );
--- END $$;
-
--- Política de retención sugerida (90-180 días): revisar particiones anteriores y eliminarlas mediante job programado.
+-- Las particiones anteriores a 180 días deben eliminarse mediante un job de mantenimiento.
 
 CREATE TABLE IF NOT EXISTS delivery_logs (
     id bigserial PRIMARY KEY,
@@ -59,10 +45,10 @@ CREATE TABLE IF NOT EXISTS delivery_logs (
     channel text NOT NULL CHECK (channel IN ('whatsapp', 'email')),
     template text NOT NULL,
     status text NOT NULL CHECK (status IN ('queued', 'sent', 'delivered', 'failed')),
+    is_free boolean NOT NULL DEFAULT false,
     provider_ref text,
     error jsonb,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now()
 );
 
 COMMIT;
