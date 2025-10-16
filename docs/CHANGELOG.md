@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- (2025-10-13) Localized the compose source-of-truth banner and refreshed env
+  templates for local/staging placeholders (`infra/docker-compose.yml`,
+  `env/.env.local.example`, `env/.env.staging.example`).
+- (2025-10-13) Extended observability with queue backlog/error metrics, JSON log
+  toggles, and refreshed alert examples (`backend/src/logging.js`,
+  `backend/src/server.js`, `docs/observability.md`,
+  `infra/monitoring/alerts.examples/latency-error-dlq.yml`).
 - (2025-10-12) Updated `infra/docker-compose.yml` to serve as the single source of
   truth for dev/staging, adding PWA/Dashboard services with healthchecks and
   documented orchestration details in `docs/compose-source-of-truth.md`.

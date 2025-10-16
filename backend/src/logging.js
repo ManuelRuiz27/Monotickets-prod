@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 export function createLogger(options = {}) {
-  const { service = 'app' } = options;
+  const { service = 'app', env = process.env } = options;
+  const logFormat = String(env?.LOG_FORMAT || 'plain').toLowerCase();
 
   return (input = {}) => {
     const timestamp = input.ts || new Date().toISOString();
@@ -20,6 +21,13 @@ export function createLogger(options = {}) {
       }).filter(([, value]) => value !== undefined && value !== null),
     );
 
-    console.log(JSON.stringify(sanitized));
+    if (logFormat === 'json') {
+      console.log(JSON.stringify(sanitized));
+      return;
+    }
+
+    const { level, message, ...rest } = sanitized;
+    const suffix = Object.keys(rest).length > 0 ? ` ${JSON.stringify(rest)}` : '';
+    console.log(`[${timestamp}] [${service}] ${String(level || 'info').toUpperCase()} ${message || ''}${suffix}`.trim());
   };
 }
