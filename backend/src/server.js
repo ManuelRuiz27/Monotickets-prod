@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
-import packageJson from '../package.json' assert { type: 'json' };
+import packageJson from '../package.json' with { type: 'json' };
 
 import { signAccessToken, signStaffToken, signViewerToken } from './auth/tokens.js';
 import { runMiddlewareStack } from './http/middleware.js';
@@ -21,6 +21,7 @@ import { ensureRedis } from './redis/client.js';
 import { hitRateLimit } from './lib/rate-limit.js';
 import { sendOtp, verifyOtp, OtpError } from './auth/otp-service.js';
 import { refreshAccessToken, revokeRefreshToken, RefreshTokenError } from './auth/refresh-tokens.js';
+import { initializeSentry } from './observability/sentry.js';
 
 const DEFAULT_APP_ENV = 'development';
 const HISTOGRAM_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
@@ -45,6 +46,10 @@ const RATE_LIMIT_DIRECTOR_REPORT_OVERVIEW = Number(process.env.RATE_LIMIT_DIRECT
 const RATE_LIMIT_DIRECTOR_REPORT_TOP = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_TOP || 30);
 const RATE_LIMIT_DIRECTOR_REPORT_DEBT = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_DEBT || 30);
 const RATE_LIMIT_DIRECTOR_REPORT_USAGE = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_USAGE || 30);
+const DEFAULT_GLOBAL_RATE_LIMIT_MAX = 100;
+const DEFAULT_GLOBAL_RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
+const DEFAULT_OTP_RATE_LIMIT_MAX = 10;
+const DEFAULT_OTP_RATE_LIMIT_WINDOW_SECONDS = 60;
 
 function observeHttpDuration({ method, route, status, durationMs }) {
   const key = `${method.toUpperCase()}::${status}::${route}`;
@@ -137,6 +142,19 @@ function updateQueueBacklog(snapshot = []) {
 export function createServer(options = {}) {
   const { env = process.env } = options;
   const logger = options.logger || createLogger({ env, service: env.SERVICE_NAME || 'backend-api' });
+  const sentry = initializeSentry({ env, logger });
+  const globalRateLimitMax = Number(
+    env.GLOBAL_RATE_LIMIT_MAX ?? env.RATE_LIMIT_GLOBAL_MAX ?? DEFAULT_GLOBAL_RATE_LIMIT_MAX,
+  );
+  const globalRateLimitWindowSeconds = Number(
+    env.GLOBAL_RATE_LIMIT_WINDOW_SECONDS ??
+      env.RATE_LIMIT_GLOBAL_WINDOW_SECONDS ??
+      DEFAULT_GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
+  );
+  const otpRouteRateLimitMax = Number(env.OTP_RATE_LIMIT_MAX ?? DEFAULT_OTP_RATE_LIMIT_MAX);
+  const otpRouteRateLimitWindowSeconds = Number(
+    env.OTP_RATE_LIMIT_WINDOW_SECONDS ?? DEFAULT_OTP_RATE_LIMIT_WINDOW_SECONDS,
+  );
   const correlationHeader = String(env.CORRELATION_HEADER || 'X-Request-Id');
   const correlationHeaderLower = correlationHeader.toLowerCase();
   const redisUrl = String(env.REDIS_URL || '');
@@ -171,8 +189,20 @@ export function createServer(options = {}) {
     const startedAt = process.hrtime.bigint();
     let requestId = req.headers[correlationHeaderLower] || randomUUID();
     res.setHeader(correlationHeader, requestId);
+    applySecurityHeaders(res, env);
     const url = new URL(req.url, `http://${req.headers.host}`);
     const method = req.method ?? 'GET';
+    const corsDecision = applyCors(req, res, env);
+    if (method === 'OPTIONS') {
+      const handled = handleCorsPreflight(req, res, env);
+      if (!handled) {
+        sendJson(res, 403, { error: 'cors_origin_forbidden', requestId });
+      }
+      return;
+    }
+    if (req.headers.origin && !corsDecision.allowed) {
+      return sendJson(res, 403, { error: 'cors_origin_forbidden', requestId });
+    }
     const requestContext = { eventId: undefined };
     const middlewareContext = {
       env,
@@ -191,14 +221,33 @@ export function createServer(options = {}) {
     }
     let auth = middlewareContext.auth || { user: null, error: 'missing_token', token: null };
     const clientFingerprint = getClientFingerprint(req);
+    if (globalRateLimitMax > 0) {
+      const globalRateKey = ['ratelimit', 'global', clientFingerprint || 'unknown'].join(':');
+      const globalLimit = await enforceRateLimit({
+        env,
+        logger,
+        res,
+        key: globalRateKey,
+        limit: globalRateLimitMax,
+        windowSeconds: globalRateLimitWindowSeconds,
+        requestId,
+        path: url.pathname,
+      });
+      if (!globalLimit.allowed) {
+        return sendJson(res, 429, {
+          error: 'global_rate_limited',
+          requestId,
+          retryAfterSeconds: globalLimit.retryAfterSeconds,
+        });
+      }
+    }
     if (auth.user?.id) {
       requestContext.userId = auth.user.id;
     }
 
     try {
       if (method === 'GET' && url.pathname === '/metrics') {
-        res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
-        res.end(renderMetrics());
+        sendText(res, 200, renderMetrics(), 'text/plain; version=0.0.4');
         return;
       }
 
@@ -274,8 +323,7 @@ export function createServer(options = {}) {
 
         const [, , , subscriptionId] = url.pathname.split('/');
         await deletePushSubscription({ userId: auth.user.id, subscriptionId });
-        res.writeHead(204);
-        res.end();
+        sendEmpty(res, 204);
         return;
       }
 
@@ -1251,8 +1299,14 @@ export function createServer(options = {}) {
         }
 
         const ipAddress = getClientFingerprint(req) || 'unknown';
-        const ipLimit = Number(env.OTP_IP_MAX_REQUESTS || 5);
-        const ipWindowSeconds = Number(env.OTP_IP_WINDOW_SECONDS || 60);
+        const ipLimit =
+          env.OTP_IP_MAX_REQUESTS !== undefined && env.OTP_IP_MAX_REQUESTS !== null
+            ? Number(env.OTP_IP_MAX_REQUESTS)
+            : otpRouteRateLimitMax;
+        const ipWindowSeconds =
+          env.OTP_IP_WINDOW_SECONDS !== undefined && env.OTP_IP_WINDOW_SECONDS !== null
+            ? Number(env.OTP_IP_WINDOW_SECONDS)
+            : otpRouteRateLimitWindowSeconds;
 
         if (ipLimit > 0) {
           const rate = await enforceRateLimit({
@@ -1276,8 +1330,7 @@ export function createServer(options = {}) {
 
         try {
           await sendOtp({ curp, env, logger, ipAddress });
-          res.writeHead(204);
-          res.end();
+          sendEmpty(res, 204);
           return;
         } catch (error) {
           if (error instanceof OtpError) {
@@ -1349,8 +1402,7 @@ export function createServer(options = {}) {
         const refreshToken = typeof body.refreshToken === 'string' ? body.refreshToken.trim() : '';
 
         if (!refreshToken) {
-          res.writeHead(204);
-          res.end();
+          sendEmpty(res, 204);
           return;
         }
 
@@ -1367,8 +1419,7 @@ export function createServer(options = {}) {
           }
         }
 
-        res.writeHead(204);
-        res.end();
+        sendEmpty(res, 204);
         return;
       }
 
@@ -1401,10 +1452,29 @@ export function createServer(options = {}) {
       sendJson(res, 404, { error: 'not_found' });
     } catch (error) {
       const handleError = middlewareContext.handleError;
+      if (error instanceof PayloadTooLargeError) {
+        const limitBytes = Number(error.limit || 0);
+        if (typeof handleError === 'function') {
+          handleError(error, {
+            statusCode: 413,
+            code: 'payload_too_large',
+            message: 'Payload too large',
+            details: { limitBytes },
+          });
+        } else {
+          sendJson(res, 413, { error: 'payload_too_large', requestId, limitBytes });
+        }
+        return;
+      }
+
+      let handledStatus = 500;
       if (typeof handleError === 'function') {
-        handleError(error, { statusCode: 500, code: 'internal_error' });
+        const result = handleError(error, { statusCode: 500, code: 'internal_error' });
+        if (result?.statusCode) {
+          handledStatus = Number(result.statusCode);
+        }
       } else {
-        sendJson(res, 500, { error: 'internal_error' });
+        sendJson(res, 500, { error: 'internal_error', requestId });
         log(
           {
             level: 'error',
@@ -1416,6 +1486,13 @@ export function createServer(options = {}) {
           },
           { logger },
         );
+      }
+
+      if (handledStatus >= 500 && typeof sentry?.captureException === 'function') {
+        sentry.captureException(error, {
+          tags: { request_id: requestId },
+          extra: { path: url.pathname },
+        });
       }
     } finally {
       const finishedAt = process.hrtime.bigint();
@@ -1609,8 +1686,178 @@ export function log(payload, { logger = defaultLogger } = {}) {
 }
 
 function sendJson(res, status, payload) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify(payload));
+  let body = payload;
+
+  if (status >= 400 && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const { error, message, details, requestId, ...rest } = payload;
+    if (typeof error === 'string') {
+      const normalized = {
+        statusCode: status,
+        code: error,
+        message: typeof message === 'string' && message.trim() ? message : status >= 500 ? 'Internal server error' : 'Request error',
+      };
+      if (requestId) {
+        normalized.requestId = requestId;
+      }
+      const detailsPayload = {};
+      if (details !== undefined) {
+        detailsPayload.details = details;
+      }
+      const extras = Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== undefined));
+      if (Object.keys(extras).length > 0) {
+        detailsPayload.details = { ...(detailsPayload.details || {}), ...extras };
+      }
+      if (detailsPayload.details !== undefined) {
+        normalized.details = detailsPayload.details;
+      }
+      body = normalized;
+    }
+  }
+
+  if (typeof res.setHeader === 'function') {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  }
+  if (typeof res.writeHead === 'function') {
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(body));
+    return;
+  }
+
+  res.statusCode = status;
+  res.end(JSON.stringify(body));
+}
+
+function sendText(res, status, text, contentType = 'text/plain; charset=utf-8') {
+  if (typeof res.setHeader === 'function') {
+    res.setHeader('Content-Type', contentType);
+  }
+  if (typeof res.writeHead === 'function') {
+    res.writeHead(status, { 'Content-Type': contentType });
+    res.end(text);
+    return;
+  }
+  res.statusCode = status;
+  res.end(text);
+}
+
+function sendEmpty(res, status) {
+  if (typeof res.writeHead === 'function') {
+    res.writeHead(status);
+    res.end();
+    return;
+  }
+  res.statusCode = status;
+  res.end();
+}
+
+function applySecurityHeaders(res, env = process.env) {
+  if (!res || typeof res.setHeader !== 'function') {
+    return;
+  }
+  const appEnv = String(env.APP_ENV || env.NODE_ENV || 'development').toLowerCase();
+  const csp =
+    "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self';" +
+    " img-src 'self' data: https:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https:;";
+  res.setHeader('Content-Security-Policy', csp);
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  if (appEnv === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
+  }
+}
+
+function resolveCorsOrigins(env = process.env) {
+  const raw = String(env.CORS_ALLOWED_ORIGINS || env.CORS_ALLOWED_ORIGIN || '').trim();
+  if (!raw) {
+    const appEnv = String(env.APP_ENV || env.NODE_ENV || 'development').toLowerCase();
+    if (appEnv === 'development' || appEnv === 'test') {
+      return ['*'];
+    }
+    return [];
+  }
+  return raw
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function appendVaryHeader(res, value) {
+  if (!res || typeof res.getHeader !== 'function' || typeof res.setHeader !== 'function') {
+    return;
+  }
+  const current = res.getHeader('Vary');
+  if (!current) {
+    res.setHeader('Vary', value);
+    return;
+  }
+  const values = new Set(String(current).split(',').map((item) => item.trim()).filter(Boolean));
+  values.add(value);
+  res.setHeader('Vary', Array.from(values).join(', '));
+}
+
+function applyCors(req, res, env = process.env) {
+  const origins = resolveCorsOrigins(env);
+  const originHeader = typeof req.headers?.origin === 'string' ? req.headers.origin : '';
+  let allowOrigin = null;
+  if (origins.includes('*')) {
+    allowOrigin = '*';
+  } else if (originHeader) {
+    allowOrigin = origins.find((allowed) => allowed.toLowerCase() === originHeader.toLowerCase()) || null;
+  }
+
+  if (allowOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+    if (allowOrigin !== '*') {
+      appendVaryHeader(res, 'Origin');
+    }
+  }
+
+  return {
+    allowed: Boolean(allowOrigin || origins.includes('*')),
+    origin: allowOrigin,
+  };
+}
+
+function handleCorsPreflight(req, res, env = process.env) {
+  const decision = applyCors(req, res, env);
+  if (!decision.allowed) {
+    return false;
+  }
+  const allowedHeaders =
+    typeof req.headers['access-control-request-headers'] === 'string'
+      ? req.headers['access-control-request-headers']
+      : 'authorization,content-type';
+  const allowedMethod =
+    typeof req.headers['access-control-request-method'] === 'string'
+      ? req.headers['access-control-request-method']
+      : 'GET';
+  res.setHeader('Access-Control-Allow-Methods', allowedMethod);
+  res.setHeader('Access-Control-Allow-Headers', allowedHeaders);
+  res.setHeader('Access-Control-Max-Age', '600');
+  sendEmpty(res, 204);
+  return true;
+}
+
+class PayloadTooLargeError extends Error {
+  constructor(limitBytes) {
+    super('Payload too large');
+    this.name = 'PayloadTooLargeError';
+    this.limit = limitBytes;
+  }
+}
+
+function getBodyLimitForRequest(req) {
+  const contentType = String(req.headers?.['content-type'] || '').toLowerCase();
+  if (contentType.includes('multipart/form-data')) {
+    return 10 * 1024 * 1024;
+  }
+  return 1 * 1024 * 1024;
 }
 
 async function appendScanLog({ eventId, guestId, result, device }) {
@@ -1636,10 +1883,28 @@ function sanitizeDevice(device) {
   }
 }
 
-function readBody(req) {
+function readBody(req, options = {}) {
+  const limit = Number(options.limit || getBodyLimitForRequest(req));
+  const contentLengthHeader = req.headers?.['content-length'];
+  if (typeof contentLengthHeader === 'string') {
+    const contentLength = Number(contentLengthHeader);
+    if (Number.isFinite(contentLength) && limit > 0 && contentLength > limit) {
+      return Promise.reject(new PayloadTooLargeError(limit));
+    }
+  }
+
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    let total = 0;
+    req.on('data', (chunk) => {
+      total += chunk.length;
+      if (limit > 0 && total > limit) {
+        req.destroy();
+        reject(new PayloadTooLargeError(limit));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
