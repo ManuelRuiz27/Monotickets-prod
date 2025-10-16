@@ -1,7 +1,15 @@
 const DEFAULTS = {
-  JWT_ACCESS_EXP: '8h',
-  JWT_STAFF_EXP: '24h',
-  JWT_VIEWER_EXP: '24h',
+  JWT_ACCESS_TTL: '8h',
+  JWT_REFRESH_TTL: '30d',
+  JWT_STAFF_TTL: '24h',
+  JWT_VIEWER_TTL: '24h',
+};
+
+const LEGACY_KEYS = {
+  JWT_ACCESS_TTL: 'JWT_ACCESS_EXP',
+  JWT_REFRESH_TTL: null,
+  JWT_STAFF_TTL: 'JWT_STAFF_EXP',
+  JWT_VIEWER_TTL: 'JWT_VIEWER_EXP',
 };
 
 const UNIT_IN_SECONDS = {
@@ -13,9 +21,10 @@ const UNIT_IN_SECONDS = {
 
 export function getJwtExpirations(env = process.env) {
   return {
-    access: readDuration(env, 'JWT_ACCESS_EXP'),
-    staff: readDuration(env, 'JWT_STAFF_EXP'),
-    viewer: readDuration(env, 'JWT_VIEWER_EXP'),
+    access: readDuration(env, 'JWT_ACCESS_TTL'),
+    refresh: readDuration(env, 'JWT_REFRESH_TTL'),
+    staff: readDuration(env, 'JWT_STAFF_TTL'),
+    viewer: readDuration(env, 'JWT_VIEWER_TTL'),
   };
 }
 
@@ -31,7 +40,7 @@ export function getJwtClaims(env = process.env) {
 }
 
 function readDuration(env, key) {
-  const rawValue = (env[key] || DEFAULTS[key]).trim();
+  const rawValue = resolveDurationValue(env, key);
   const match = rawValue.match(/^(\d+)([smhd])$/i);
 
   if (!match) {
@@ -48,9 +57,30 @@ function readDuration(env, key) {
   return Number(amount) * factor;
 }
 
+function resolveDurationValue(env, key) {
+  const primary = String(env[key] || '').trim();
+  if (primary) {
+    return primary;
+  }
+  const legacyKey = LEGACY_KEYS[key];
+  if (legacyKey) {
+    const legacy = String(env[legacyKey] || '').trim();
+    if (legacy) {
+      return legacy;
+    }
+  }
+  const defaultValue = DEFAULTS[key] || (legacyKey ? DEFAULTS[legacyKey] : '');
+  if (defaultValue) {
+    return defaultValue;
+  }
+  throw new Error(`Duration for ${key} is not configured`);
+}
+
 export const internals = {
   readDuration,
   UNIT_IN_SECONDS,
   DEFAULTS,
   getJwtClaims,
+  resolveDurationValue,
+  LEGACY_KEYS,
 };
