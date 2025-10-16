@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        browser: [chromium, firefox, webkit]
+        browser: [chrome, msedge, firefox]
     env:
       CI: '1'
       HEADLESS: '1'
@@ -50,9 +50,26 @@ jobs:
         run: npx playwright install --with-deps ${{ matrix.browser }}
         working-directory: tests
 
-      - name: Check readiness
-        if: ${{ hashFiles('infra/check-readiness.sh') != '' }}
-        run: bash infra/check-readiness.sh
+      - name: Launch application stack
+        run: |
+          docker compose up -d database redis backend-api dashboard
+
+      - name: Prepare smoke logs
+        run: mkdir -p reports/smoke
+
+      - name: Smoke - readiness gate
+        env:
+          BACKEND_URL: http://backend:3000/health
+          FRONTEND_URL: http://frontend:3001/health
+        run: |
+          bash infra/check-readiness.sh | tee reports/smoke/readiness-${{ matrix.browser }}.log
+
+      - name: Smoke - health endpoints
+        env:
+          BACKEND_URL: http://backend:3000/health
+          FRONTEND_URL: http://frontend:3001/health
+        run: |
+          bash infra/check-services.sh | tee reports/smoke/services-${{ matrix.browser }}.log
 
       - name: Run E2E (${{ matrix.browser }})
         run: npx playwright test --config tests/playwright.config.ts --project=${{ matrix.browser }}
@@ -76,3 +93,14 @@ jobs:
         with:
           name: playwright-artifacts-${{ matrix.browser }}
           path: tests/artifacts
+
+      - name: Upload smoke logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-${{ matrix.browser }}
+          path: reports/smoke
+
+      - name: Teardown stack
+        if: always()
+        run: docker compose down

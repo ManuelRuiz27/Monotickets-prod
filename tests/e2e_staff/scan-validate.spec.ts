@@ -114,7 +114,7 @@ test.describe('@scan validation flows', () => {
     expect(response.status()).toBe(200);
     const payload = await response.json().catch(() => ({}));
     const status = String(payload.status || payload.state || '').toLowerCase();
-    expect(status).toMatch(/valid|scan|ok/);
+    expect(status).toMatch(/valid|scann|ok/);
 
     if (payload.hapticFeedback || payload.feedback) {
       test.info().annotations.push({
