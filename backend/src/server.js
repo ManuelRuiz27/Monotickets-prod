@@ -14,6 +14,7 @@ import { createDeliveryModule } from './modules/delivery.js';
 import { createDirectorModule } from './modules/director.js';
 import { createPaymentsModule } from './modules/payments.js';
 import { createCatalogModule } from './modules/catalog.js';
+import { createPushSubscription, deletePushSubscription, serializePushSubscription } from './modules/push-subscriptions.js';
 import { createErrorInterceptor } from './http/error-interceptor.js';
 import { query } from './db/index.js';
 import { ensureRedis } from './redis/client.js';
@@ -201,6 +202,26 @@ export function createServer(options = {}) {
         return;
       }
 
+      if (method === 'GET' && url.pathname === '/healthz') {
+        let dbHealthy = false;
+        try {
+          await query('SELECT 1');
+          dbHealthy = true;
+        } catch (error) {
+          log(
+            { level: 'error', message: 'healthcheck_db_failed', error: error.message, request_id: requestId },
+            { logger },
+          );
+        }
+
+        return sendJson(res, 200, { status: 'ok', db: dbHealthy });
+      }
+
+      if (method === 'GET' && url.pathname === '/version') {
+        const commit = env.GIT_COMMIT_SHORT ? String(env.GIT_COMMIT_SHORT) : null;
+        return sendJson(res, 200, { version: APP_VERSION, commit });
+      }
+
       if (method === 'GET' && url.pathname === '/health') {
         return sendJson(res, 200, {
           status: 'ok',
@@ -208,6 +229,54 @@ export function createServer(options = {}) {
           version: APP_VERSION,
           uptimeMs: Date.now() - APP_BOOT_TIME_MS,
         });
+      }
+
+      if (method === 'POST' && url.pathname === '/push/subscriptions') {
+        if (!auth?.user?.id) {
+          return sendJson(res, 401, { error: auth?.error || 'unauthorized', requestId });
+        }
+
+        const body = await readJsonBody(req, logger);
+        const endpoint = typeof body.endpoint === 'string' ? body.endpoint.trim() : '';
+        const p256dh = typeof body.p256dh === 'string' ? body.p256dh.trim() : '';
+        const authKey = typeof body.auth === 'string' ? body.auth.trim() : '';
+
+        if (!endpoint || !p256dh || !authKey) {
+          return sendJson(res, 400, { error: 'invalid_subscription_payload', requestId });
+        }
+
+        try {
+          const record = await createPushSubscription({
+            userId: auth.user.id,
+            endpoint,
+            p256dh,
+            auth: authKey,
+          });
+
+          return sendJson(res, 201, { data: serializePushSubscription(record), requestId });
+        } catch (error) {
+          if (error?.message?.includes('push_subscriptions_user_id_endpoint_key')) {
+            return sendJson(res, 409, { error: 'subscription_exists', requestId });
+          }
+
+          log(
+            { level: 'error', message: 'push_subscription_create_failed', error: error.message, request_id: requestId },
+            { logger },
+          );
+          return sendJson(res, 500, { error: 'push_subscription_error', requestId });
+        }
+      }
+
+      if (method === 'DELETE' && /^\/push\/subscriptions\/[a-f0-9-]+$/i.test(url.pathname)) {
+        if (!auth?.user?.id) {
+          return sendJson(res, 401, { error: auth?.error || 'unauthorized', requestId });
+        }
+
+        const [, , , subscriptionId] = url.pathname.split('/');
+        await deletePushSubscription({ userId: auth.user.id, subscriptionId });
+        res.writeHead(204);
+        res.end();
+        return;
       }
 
       if (method === 'GET' && url.pathname === '/catalog') {
