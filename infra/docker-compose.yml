@@ -1,4 +1,4 @@
-# NOTE: infra/docker-compose.yml is the single source of truth for Monotickets dev/staging orchestration.
+# NOTA: Este archivo es la fuente de verdad para dev/staging. infra/docker-compose.yml is the single source of truth for Monotickets dev/staging orchestration.
 # BEGIN devops-compose
 networks:
   monotickets_net:

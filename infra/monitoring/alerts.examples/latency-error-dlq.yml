@@ -3,7 +3,7 @@
 
 # Latency thresholds
 - alert: BackendP95LatencyHigh
-  expr: histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket{path="/scan/validate"}[5m])) by (le)) > 0.3
+  expr: histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket{route="/scan/validate"}[5m])) by (le)) > 0.3
   for: 5m
   labels:
     severity: warning
@@ -12,17 +12,17 @@
     description: "95th percentile latency is {{ $value }}s (>300ms). Investigate backend performance."
 
 - alert: BackendP99LatencyHigh
-  expr: histogram_quantile(0.99, sum(rate(http_request_duration_ms_bucket{path=~"/events/.+"}[5m])) by (le, path)) > 0.5
+  expr: histogram_quantile(0.99, sum(rate(http_request_duration_ms_bucket{route=~"/events/.+"}[5m])) by (le, route)) > 0.5
   for: 5m
   labels:
     severity: critical
   annotations:
     summary: "P99 latency high on events routes"
-    description: "99th percentile latency {{ $value }}s on {{ $labels.path }}."
+    description: "99th percentile latency {{ $value }}s on {{ $labels.route }}."
 
 # Error budget
 - alert: Backend5xxErrorRate
-  expr: sum(rate(http_request_duration_ms_count{status=~"5.."}[5m])) / sum(rate(http_request_duration_ms_count[5m])) > 0.02
+  expr: sum(rate(http_requests_total{status=~"5.."}[10m])) / sum(rate(http_requests_total[10m])) > 0.02
   for: 10m
   labels:
     severity: critical
@@ -32,7 +32,7 @@
 
 # Dead letter queue
 - alert: DeliveryDeadLetterBacklog
-  expr: monotickets_dead_letter_jobs > 10
+  expr: queue_backlog{queue="delivery"} > 10
   for: 15m
   labels:
     severity: warning

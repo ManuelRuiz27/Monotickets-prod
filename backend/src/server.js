@@ -25,6 +25,9 @@ import { hitRateLimit } from './lib/rate-limit.js';
 const DEFAULT_APP_ENV = 'development';
 const HISTOGRAM_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
 const metricsRegistry = new Map();
+const requestTotals = new Map();
+const queueBacklogGauge = new Map();
+const queueFailuresCounter = new Map();
 const APP_VERSION = packageJson.version || '0.0.0';
 const APP_BOOT_TIME_MS = Date.now();
 const DEFAULT_GUEST_LIST_LIMIT = 50;
@@ -43,8 +46,8 @@ const RATE_LIMIT_DIRECTOR_REPORT_TOP = Number(process.env.RATE_LIMIT_DIRECTOR_RE
 const RATE_LIMIT_DIRECTOR_REPORT_DEBT = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_DEBT || 30);
 const RATE_LIMIT_DIRECTOR_REPORT_USAGE = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_USAGE || 30);
 
-function observeHttpDuration({ method, path, status, durationMs }) {
-  const key = `${method.toUpperCase()}::${status}::${path}`;
+function observeHttpDuration({ method, route, status, durationMs }) {
+  const key = `${method.toUpperCase()}::${status}::${route}`;
   if (!metricsRegistry.has(key)) {
     metricsRegistry.set(key, {
       count: 0,
@@ -63,6 +66,10 @@ function observeHttpDuration({ method, path, status, durationMs }) {
   } else {
     metric.buckets[bucketIndex] += 1;
   }
+
+  const totalKey = `${method.toUpperCase()}::${status}::${route}`;
+  const current = requestTotals.get(totalKey) || 0;
+  requestTotals.set(totalKey, current + 1);
 }
 
 function renderMetrics() {
@@ -72,28 +79,66 @@ function renderMetrics() {
   ];
 
   for (const [key, metric] of metricsRegistry.entries()) {
-    const [method, status, path] = key.split('::');
+    const [method, status, route] = key.split('::');
     let cumulative = 0;
     HISTOGRAM_BUCKETS.forEach((boundary, index) => {
       cumulative += metric.buckets[index];
       lines.push(
-        `http_request_duration_ms_bucket{le="${boundary}",method="${method}",path="${path}",status="${status}"} ${cumulative}`,
+        `http_request_duration_ms_bucket{le="${boundary}",method="${method}",route="${route}",status="${status}"} ${cumulative}`,
       );
     });
     cumulative += metric.buckets[HISTOGRAM_BUCKETS.length];
     lines.push(
-      `http_request_duration_ms_bucket{le="+Inf",method="${method}",path="${path}",status="${status}"} ${cumulative}`,
+      `http_request_duration_ms_bucket{le="+Inf",method="${method}",route="${route}",status="${status}"} ${cumulative}`,
     );
-    lines.push(`http_request_duration_ms_sum{method="${method}",path="${path}",status="${status}"} ${metric.sum}`);
-    lines.push(`http_request_duration_ms_count{method="${method}",path="${path}",status="${status}"} ${metric.count}`);
+    lines.push(`http_request_duration_ms_sum{method="${method}",route="${route}",status="${status}"} ${metric.sum}`);
+    lines.push(`http_request_duration_ms_count{method="${method}",route="${route}",status="${status}"} ${metric.count}`);
+  }
+
+  if (requestTotals.size > 0) {
+    lines.push('# HELP http_requests_total Total HTTP requests processed.');
+    lines.push('# TYPE http_requests_total counter');
+    for (const [key, value] of requestTotals.entries()) {
+      const [method, status, route] = key.split('::');
+      lines.push(`http_requests_total{method="${method}",route="${route}",status="${status}"} ${value}`);
+    }
+  }
+
+  if (queueBacklogGauge.size > 0) {
+    lines.push('# HELP queue_backlog Pending jobs in queue (waiting + delayed).');
+    lines.push('# TYPE queue_backlog gauge');
+    for (const [queue, pending] of queueBacklogGauge.entries()) {
+      lines.push(`queue_backlog{queue="${queue}"} ${pending}`);
+    }
+  }
+
+  if (queueFailuresCounter.size > 0) {
+    lines.push('# HELP jobs_failed_total Total number of failed queue jobs.');
+    lines.push('# TYPE jobs_failed_total counter');
+    for (const [queue, total] of queueFailuresCounter.entries()) {
+      lines.push(`jobs_failed_total{queue="${queue}"} ${total}`);
+    }
   }
 
   return `${lines.join('\n')}\n`;
 }
 
+function incrementQueueFailures(queue) {
+  const current = queueFailuresCounter.get(queue) || 0;
+  queueFailuresCounter.set(queue, current + 1);
+}
+
+function updateQueueBacklog(snapshot = []) {
+  snapshot.forEach(({ name, waiting = 0, delayed = 0 }) => {
+    queueBacklogGauge.set(name, Number(waiting || 0) + Number(delayed || 0));
+  });
+}
+
 export function createServer(options = {}) {
   const { env = process.env } = options;
   const logger = options.logger || createLogger({ env, service: env.SERVICE_NAME || 'backend-api' });
+  const correlationHeader = String(env.CORRELATION_HEADER || 'X-Request-Id');
+  const correlationHeaderLower = correlationHeader.toLowerCase();
   const queuesPromise = createQueues({ env, logger }).catch((error) => {
     log({ level: 'error', message: 'queue_initialization_failed', error: error.message }, { logger });
     throw error;
@@ -114,8 +159,8 @@ export function createServer(options = {}) {
 
   return http.createServer(async (req, res) => {
     const startedAt = process.hrtime.bigint();
-    let requestId = req.headers['x-request-id'] || randomUUID();
-    res.setHeader('x-request-id', requestId);
+    let requestId = req.headers[correlationHeaderLower] || randomUUID();
+    res.setHeader(correlationHeader, requestId);
     const url = new URL(req.url, `http://${req.headers.host}`);
     const method = req.method ?? 'GET';
     const requestContext = { eventId: undefined };
@@ -132,7 +177,7 @@ export function createServer(options = {}) {
     }
     if (middlewareContext.requestId && middlewareContext.requestId !== requestId) {
       requestId = middlewareContext.requestId;
-      res.setHeader('x-request-id', requestId);
+      res.setHeader(correlationHeader, requestId);
     }
     let auth = middlewareContext.auth || { user: null, error: 'missing_token', token: null };
     const clientFingerprint = getClientFingerprint(req);
@@ -1157,7 +1202,7 @@ export function createServer(options = {}) {
       const latencyMs = Number(finishedAt - startedAt) / 1_000_000;
       observeHttpDuration({
         method,
-        path: url.pathname,
+        route: url.pathname,
         status: String(res.statusCode),
         durationMs: latencyMs,
       });
@@ -1186,7 +1231,7 @@ function attachQueueObservers(queuesPromise, logger, env) {
   queuesPromise
     .then((queues) => {
       const watchers = [
-        { name: 'whatsapp', events: queues.whatsappEvents, queue: queues.whatsappQueue },
+        { name: 'delivery', events: queues.whatsappEvents, queue: queues.whatsappQueue },
         { name: 'email', events: queues.emailEvents, queue: queues.emailQueue },
         { name: 'pdf', events: queues.pdfEvents, queue: queues.pdfQueue },
         { name: 'deliveryFailed', events: queues.deliveryFailedEvents, queue: queues.deliveryFailedQueue },
@@ -1197,6 +1242,7 @@ function attachQueueObservers(queuesPromise, logger, env) {
       watchers.forEach(({ name, events }) => {
         if (!events) return;
         events.on('failed', ({ jobId, job }) => {
+          incrementQueueFailures(name);
           log(
             {
               level: 'warn',
@@ -1209,6 +1255,7 @@ function attachQueueObservers(queuesPromise, logger, env) {
           );
         });
         events.on('dead-letter', ({ jobId, job }) => {
+          incrementQueueFailures(name);
           log(
             {
               level: 'error',
@@ -1233,6 +1280,7 @@ function attachQueueObservers(queuesPromise, logger, env) {
               active: await queue.countActive(),
             })),
           );
+          updateQueueBacklog(snapshot);
           log({ level: 'info', message: 'queue_metrics_snapshot', queues: snapshot }, { logger });
         } catch (error) {
           log({ level: 'error', message: 'queue_metrics_error', error: error.message }, { logger });
@@ -1240,6 +1288,9 @@ function attachQueueObservers(queuesPromise, logger, env) {
       };
 
       setInterval(emitMetrics, interval).unref();
+      emitMetrics().catch((error) => {
+        log({ level: 'error', message: 'queue_metrics_error', error: error.message }, { logger });
+      });
     })
     .catch((error) => {
       log({ level: 'error', message: 'queue_observer_failed', error: error.message }, { logger });
