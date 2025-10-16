@@ -13,6 +13,7 @@ import { createQueues } from './queues/index.js';
 import { createDeliveryModule } from './modules/delivery.js';
 import { createDirectorModule } from './modules/director.js';
 import { createPaymentsModule } from './modules/payments.js';
+import { createCatalogModule } from './modules/catalog.js';
 import { createErrorInterceptor } from './http/error-interceptor.js';
 import { query } from './db/index.js';
 import { ensureRedis } from './redis/client.js';
@@ -151,6 +152,7 @@ export function createServer(options = {}) {
   const deliveryModule = createDeliveryModule({ env, logger, queuesPromise });
   const directorModule = createDirectorModule({ env, logger });
   const paymentsModule = createPaymentsModule({ env, logger, queuesPromise });
+  const catalogModule = createCatalogModule({ env, logger });
   const middlewares = [
     createErrorInterceptor({ env, logger }),
     createJwtAuthMiddleware({ env, logger }),
@@ -206,6 +208,18 @@ export function createServer(options = {}) {
           version: APP_VERSION,
           uptimeMs: Date.now() - APP_BOOT_TIME_MS,
         });
+      }
+
+      if (method === 'GET' && url.pathname === '/catalog') {
+        const filters = Object.fromEntries(url.searchParams.entries());
+        const { statusCode, payload } = await catalogModule.getCatalog({ filters });
+        return sendJson(res, statusCode, { ...payload, requestId });
+      }
+
+      if (method === 'GET' && /^\/catalog\/[a-f0-9-]+$/i.test(url.pathname)) {
+        const [, , merchantId] = url.pathname.split('/');
+        const { statusCode, payload } = await catalogModule.getMerchantById({ id: merchantId });
+        return sendJson(res, statusCode, { ...payload, requestId });
       }
 
       if (method === 'POST' && url.pathname === '/deliver/send') {

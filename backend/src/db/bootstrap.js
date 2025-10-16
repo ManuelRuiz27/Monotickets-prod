@@ -52,6 +52,24 @@ async function ensureCoreTables(logger) {
   `);
 
   await query(`
+    CREATE TABLE IF NOT EXISTS merchants (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      nombre text NOT NULL,
+      categoria text NOT NULL,
+      municipio text NOT NULL,
+      descuento integer NOT NULL DEFAULT 0,
+      direccion text NOT NULL,
+      horario text NOT NULL,
+      descripcion text,
+      lat double precision,
+      lng double precision,
+      activo boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+
+  await query(`
     CREATE TABLE IF NOT EXISTS users (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       curp text NOT NULL UNIQUE,
@@ -81,6 +99,9 @@ async function ensureCoreTables(logger) {
   await query('CREATE INDEX IF NOT EXISTS idx_invites_event_code ON invites(event_id, code)');
   await query('CREATE INDEX IF NOT EXISTS idx_guests_event_status ON guests(event_id, status)');
   await query('CREATE INDEX IF NOT EXISTS idx_scan_logs_event_created_at ON scan_logs(event_id, created_at DESC)');
+  await query('CREATE INDEX IF NOT EXISTS idx_merchants_categoria ON merchants(categoria)');
+  await query('CREATE INDEX IF NOT EXISTS idx_merchants_municipio ON merchants(municipio)');
+  await query('CREATE INDEX IF NOT EXISTS idx_merchants_nombre ON merchants(nombre)');
 
   logger({ level: 'info', message: 'db_core_tables_ready' });
 }

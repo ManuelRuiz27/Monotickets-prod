@@ -118,6 +118,84 @@ function createMemoryPool() {
       return { rows: [], rowCount: 0 };
     }
 
+    if (normalized.startsWith('insert into merchants')) {
+      const table = ensureTable('merchants');
+      const columnsMatch = text.match(/insert into merchants\s*\(([^)]+)\)/i);
+      const columns = columnsMatch
+        ? columnsMatch[1]
+            .split(',')
+            .map((column) => column.trim().replace(/"/g, ''))
+        : [];
+      const baseRow = {
+        id: randomUUID(),
+        nombre: null,
+        categoria: null,
+        municipio: null,
+        descuento: 0,
+        direccion: null,
+        horario: null,
+        descripcion: null,
+        lat: null,
+        lng: null,
+        activo: true,
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+      columns.forEach((column, index) => {
+        baseRow[column] = params[index];
+      });
+      if (baseRow.id === null || baseRow.id === undefined) {
+        baseRow.id = randomUUID();
+      }
+      table.push(structuredClone(baseRow));
+      return { rows: [structuredClone(baseRow)], rowCount: 1 };
+    }
+
+    if (normalized.startsWith('delete from merchants')) {
+      const table = ensureTable('merchants');
+      const deleted = table.length;
+      table.splice(0, table.length);
+      return { rows: [], rowCount: deleted };
+    }
+
+    if (normalized.startsWith('select') && normalized.includes('from merchants')) {
+      const table = ensureTable('merchants');
+      const matches = filterMerchantsRows({ text, params, table });
+
+      if (/count\(\*\)/.test(normalized)) {
+        return { rows: [{ count: String(matches.length) }], rowCount: 1 };
+      }
+
+      const sorted = matches.slice().sort((a, b) => {
+        return String(a.nombre || '').localeCompare(String(b.nombre || ''), undefined, { sensitivity: 'base' });
+      });
+
+      let limit;
+      let offset = 0;
+      const limitParamMatch = text.match(/limit \$([0-9]+)/i);
+      if (limitParamMatch) {
+        limit = Number(params[Number(limitParamMatch[1]) - 1]);
+      } else {
+        const limitLiteralMatch = text.match(/limit\s+([0-9]+)/i);
+        if (limitLiteralMatch) {
+          limit = Number(limitLiteralMatch[1]);
+        }
+      }
+
+      const offsetParamMatch = text.match(/offset \$([0-9]+)/i);
+      if (offsetParamMatch) {
+        offset = Number(params[Number(offsetParamMatch[1]) - 1]);
+      } else {
+        const offsetLiteralMatch = text.match(/offset\s+([0-9]+)/i);
+        if (offsetLiteralMatch) {
+          offset = Number(offsetLiteralMatch[1]);
+        }
+      }
+
+      const sliced = typeof limit === 'number' ? sorted.slice(offset, offset + limit) : sorted.slice(offset);
+      return { rows: sliced.map((row) => structuredClone(row)), rowCount: sliced.length };
+    }
+
     if (normalized.startsWith('insert into users')) {
       const curp = params[0];
       const status = params[1] || 'pending';
@@ -213,6 +291,48 @@ function createMemoryPool() {
     },
     on() {},
   };
+}
+
+function filterMerchantsRows({ text, params, table }) {
+  const categoriaMatch = text.match(/categoria\s*=\s*\$([0-9]+)/i);
+  const municipioMatch = text.match(/municipio\s*=\s*\$([0-9]+)/i);
+  const searchMatch = text.match(/ilike\s+\$([0-9]+)/i);
+  const idMatch = text.match(/\bid\s*=\s*\$([0-9]+)/i);
+
+  const categoria = categoriaMatch ? params[Number(categoriaMatch[1]) - 1] : undefined;
+  const municipio = municipioMatch ? params[Number(municipioMatch[1]) - 1] : undefined;
+  const id = idMatch ? params[Number(idMatch[1]) - 1] : undefined;
+  let search;
+  if (searchMatch) {
+    const raw = params[Number(searchMatch[1]) - 1];
+    if (typeof raw === 'string') {
+      search = raw.replace(/%/g, '').toLowerCase();
+    }
+  }
+
+  return table.filter((row) => {
+    const isActive = row.activo !== false;
+    if (!isActive) {
+      return false;
+    }
+    if (categoria && row.categoria !== categoria) {
+      return false;
+    }
+    if (municipio && row.municipio !== municipio) {
+      return false;
+    }
+    if (id && row.id !== id) {
+      return false;
+    }
+    if (search) {
+      const nombre = String(row.nombre || '').toLowerCase();
+      const descripcion = String(row.descripcion || '').toLowerCase();
+      if (!nombre.includes(search) && !descripcion.includes(search)) {
+        return false;
+      }
+    }
+    return true;
+  });
 }
 
 export const internals = {
