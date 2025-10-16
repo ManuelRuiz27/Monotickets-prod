@@ -196,6 +196,74 @@ function createMemoryPool() {
       return { rows: sliced.map((row) => structuredClone(row)), rowCount: sliced.length };
     }
 
+    if (normalized.startsWith('insert into push_subscriptions')) {
+      const table = ensureTable('push_subscriptions');
+      const [userId, endpoint, p256dh, authKey] = params;
+      const existing = table.find((row) => row.user_id === userId && row.endpoint === endpoint);
+      if (existing) {
+        throw new Error('duplicate key value violates unique constraint "push_subscriptions_user_id_endpoint_key"');
+      }
+      const now = new Date();
+      const row = {
+        id: randomUUID(),
+        user_id: userId,
+        endpoint,
+        p256dh: p256dh,
+        auth: authKey,
+        created_at: now,
+        deleted_at: null,
+      };
+      table.push(row);
+      return { rows: [structuredClone(row)], rowCount: 1 };
+    }
+
+    if (normalized.startsWith('delete from push_subscriptions where id = $1 and user_id = $2')) {
+      const table = ensureTable('push_subscriptions');
+      const [id, userId] = params;
+      const index = table.findIndex((row) => row.id === id && row.user_id === userId);
+      if (index !== -1) {
+        table.splice(index, 1);
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+
+    if (normalized.startsWith('delete from push_subscriptions')) {
+      const table = ensureTable('push_subscriptions');
+      const count = table.length;
+      table.splice(0, table.length);
+      return { rows: [], rowCount: count };
+    }
+
+    if (normalized.startsWith('select') && normalized.includes('from push_subscriptions')) {
+      const table = ensureTable('push_subscriptions');
+      let rows = table.slice();
+
+      const userMatch = text.match(/user_id\s*=\s*\$([0-9]+)/i);
+      if (userMatch) {
+        const value = params[Number(userMatch[1]) - 1];
+        rows = rows.filter((row) => row.user_id === value);
+      }
+
+      const endpointMatch = text.match(/endpoint\s*=\s*\$([0-9]+)/i);
+      if (endpointMatch) {
+        const value = params[Number(endpointMatch[1]) - 1];
+        rows = rows.filter((row) => row.endpoint === value);
+      }
+
+      const idMatch = text.match(/\bid\s*=\s*\$([0-9]+)/i);
+      if (idMatch) {
+        const value = params[Number(idMatch[1]) - 1];
+        rows = rows.filter((row) => row.id === value);
+      }
+
+      if (normalized.includes('count(*)')) {
+        return { rows: [{ count: String(rows.length) }], rowCount: 1 };
+      }
+
+      return { rows: rows.map((row) => structuredClone(row)), rowCount: rows.length };
+    }
+
     if (normalized.startsWith('insert into users')) {
       const curp = params[0];
       const status = params[1] || 'pending';
