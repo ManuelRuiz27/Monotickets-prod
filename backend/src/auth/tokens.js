@@ -18,6 +18,10 @@ export function signAccessToken(payload, options = {}) {
   return signToken(payload, 'access', options);
 }
 
+export function signRefreshToken(payload, options = {}) {
+  return signToken(payload, 'refresh', options);
+}
+
 export function signStaffToken(payload, options = {}) {
   return signToken(payload, 'staff', options);
 }
