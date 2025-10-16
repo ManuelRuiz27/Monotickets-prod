@@ -3,7 +3,7 @@ import { after, before, describe, it } from 'node:test';
 
 import { createServer } from '../src/server.js';
 import { initializeDatabase } from '../src/db/bootstrap.js';
-import packageJson from '../package.json' assert { type: 'json' };
+import packageJson from '../package.json' with { type: 'json' };
 
 describe('Health and version endpoints', () => {
   let server;
