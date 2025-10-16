@@ -9,14 +9,10 @@ describe('POST /auth/login', () => {
   let baseUrl;
 
   before(async () => {
-    process.env.DB_DRIVER = 'memory';
-    process.env.REDIS_DRIVER = 'memory';
-    process.env.REDIS_URL = 'memory://local';
-    process.env.QUEUES_DISABLED = '1';
     process.env.JWT_SECRET = 'integration-secret';
-    process.env.JWT_ACCESS_TTL = '2h';
-    process.env.JWT_STAFF_TTL = '3h';
-    process.env.JWT_VIEWER_TTL = '4h';
+    process.env.JWT_ACCESS_EXP = '2h';
+    process.env.JWT_STAFF_EXP = '3h';
+    process.env.JWT_VIEWER_EXP = '4h';
 
     server = createServer({ env: process.env });
 

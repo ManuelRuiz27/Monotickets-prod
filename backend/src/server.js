@@ -3,7 +3,11 @@ import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import packageJson from '../package.json' assert { type: 'json' };
 
-import { signAccessToken, signStaffToken, signViewerToken } from './auth/tokens.js';
+import {
+  signAccessToken,
+  signStaffToken,
+  signViewerToken,
+} from './auth/tokens.js';
 import { runMiddlewareStack } from './http/middleware.js';
 import { createJwtAuthMiddleware } from './auth/middleware.js';
 import { authenticateRequest } from './auth/authorization.js';
@@ -13,14 +17,10 @@ import { createQueues } from './queues/index.js';
 import { createDeliveryModule } from './modules/delivery.js';
 import { createDirectorModule } from './modules/director.js';
 import { createPaymentsModule } from './modules/payments.js';
-import { createCatalogModule } from './modules/catalog.js';
-import { createPushSubscription, deletePushSubscription, serializePushSubscription } from './modules/push-subscriptions.js';
 import { createErrorInterceptor } from './http/error-interceptor.js';
 import { query } from './db/index.js';
 import { ensureRedis } from './redis/client.js';
 import { hitRateLimit } from './lib/rate-limit.js';
-import { sendOtp, verifyOtp, OtpError } from './auth/otp-service.js';
-import { refreshAccessToken, revokeRefreshToken, RefreshTokenError } from './auth/refresh-tokens.js';
 
 const DEFAULT_APP_ENV = 'development';
 const HISTOGRAM_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
@@ -139,21 +139,13 @@ export function createServer(options = {}) {
   const logger = options.logger || createLogger({ env, service: env.SERVICE_NAME || 'backend-api' });
   const correlationHeader = String(env.CORRELATION_HEADER || 'X-Request-Id');
   const correlationHeaderLower = correlationHeader.toLowerCase();
-  const redisUrl = String(env.REDIS_URL || '');
-  const redisDriver = String(env.REDIS_DRIVER || '').toLowerCase();
-  const redisInMemory = redisDriver === 'memory' || redisUrl.toLowerCase().startsWith('memory://');
-  const queuesDisabled =
-    ['1', 'true', 'yes', 'on'].includes(String(env.QUEUES_DISABLED || '').toLowerCase()) || redisInMemory;
-  const queuesPromise = queuesDisabled
-    ? Promise.resolve(createDisabledQueues())
-    : createQueues({ env, logger }).catch((error) => {
-        log({ level: 'error', message: 'queue_initialization_failed', error: error.message }, { logger });
-        throw error;
-      });
+  const queuesPromise = createQueues({ env, logger }).catch((error) => {
+    log({ level: 'error', message: 'queue_initialization_failed', error: error.message }, { logger });
+    throw error;
+  });
   const deliveryModule = createDeliveryModule({ env, logger, queuesPromise });
   const directorModule = createDirectorModule({ env, logger });
   const paymentsModule = createPaymentsModule({ env, logger, queuesPromise });
-  const catalogModule = createCatalogModule({ env, logger });
   const middlewares = [
     createErrorInterceptor({ env, logger }),
     createJwtAuthMiddleware({ env, logger }),
@@ -163,9 +155,7 @@ export function createServer(options = {}) {
   const scanRequireAuthFlag = String(env.SCAN_REQUIRE_AUTH || '').toLowerCase();
   const requireScanAuth = ['1', 'true', 'yes', 'on'].includes(scanRequireAuthFlag);
 
-  if (!queuesDisabled) {
-    attachQueueObservers(queuesPromise, logger, env);
-  }
+  attachQueueObservers(queuesPromise, logger, env);
 
   return http.createServer(async (req, res) => {
     const startedAt = process.hrtime.bigint();
@@ -202,26 +192,6 @@ export function createServer(options = {}) {
         return;
       }
 
-      if (method === 'GET' && url.pathname === '/healthz') {
-        let dbHealthy = false;
-        try {
-          await query('SELECT 1');
-          dbHealthy = true;
-        } catch (error) {
-          log(
-            { level: 'error', message: 'healthcheck_db_failed', error: error.message, request_id: requestId },
-            { logger },
-          );
-        }
-
-        return sendJson(res, 200, { status: 'ok', db: dbHealthy });
-      }
-
-      if (method === 'GET' && url.pathname === '/version') {
-        const commit = env.GIT_COMMIT_SHORT ? String(env.GIT_COMMIT_SHORT) : null;
-        return sendJson(res, 200, { version: APP_VERSION, commit });
-      }
-
       if (method === 'GET' && url.pathname === '/health') {
         return sendJson(res, 200, {
           status: 'ok',
@@ -229,66 +199,6 @@ export function createServer(options = {}) {
           version: APP_VERSION,
           uptimeMs: Date.now() - APP_BOOT_TIME_MS,
         });
-      }
-
-      if (method === 'POST' && url.pathname === '/push/subscriptions') {
-        if (!auth?.user?.id) {
-          return sendJson(res, 401, { error: auth?.error || 'unauthorized', requestId });
-        }
-
-        const body = await readJsonBody(req, logger);
-        const endpoint = typeof body.endpoint === 'string' ? body.endpoint.trim() : '';
-        const p256dh = typeof body.p256dh === 'string' ? body.p256dh.trim() : '';
-        const authKey = typeof body.auth === 'string' ? body.auth.trim() : '';
-
-        if (!endpoint || !p256dh || !authKey) {
-          return sendJson(res, 400, { error: 'invalid_subscription_payload', requestId });
-        }
-
-        try {
-          const record = await createPushSubscription({
-            userId: auth.user.id,
-            endpoint,
-            p256dh,
-            auth: authKey,
-          });
-
-          return sendJson(res, 201, { data: serializePushSubscription(record), requestId });
-        } catch (error) {
-          if (error?.message?.includes('push_subscriptions_user_id_endpoint_key')) {
-            return sendJson(res, 409, { error: 'subscription_exists', requestId });
-          }
-
-          log(
-            { level: 'error', message: 'push_subscription_create_failed', error: error.message, request_id: requestId },
-            { logger },
-          );
-          return sendJson(res, 500, { error: 'push_subscription_error', requestId });
-        }
-      }
-
-      if (method === 'DELETE' && /^\/push\/subscriptions\/[a-f0-9-]+$/i.test(url.pathname)) {
-        if (!auth?.user?.id) {
-          return sendJson(res, 401, { error: auth?.error || 'unauthorized', requestId });
-        }
-
-        const [, , , subscriptionId] = url.pathname.split('/');
-        await deletePushSubscription({ userId: auth.user.id, subscriptionId });
-        res.writeHead(204);
-        res.end();
-        return;
-      }
-
-      if (method === 'GET' && url.pathname === '/catalog') {
-        const filters = Object.fromEntries(url.searchParams.entries());
-        const { statusCode, payload } = await catalogModule.getCatalog({ filters });
-        return sendJson(res, statusCode, { ...payload, requestId });
-      }
-
-      if (method === 'GET' && /^\/catalog\/[a-f0-9-]+$/i.test(url.pathname)) {
-        const [, , merchantId] = url.pathname.split('/');
-        const { statusCode, payload } = await catalogModule.getMerchantById({ id: merchantId });
-        return sendJson(res, statusCode, { ...payload, requestId });
       }
 
       if (method === 'POST' && url.pathname === '/deliver/send') {
@@ -1242,136 +1152,6 @@ export function createServer(options = {}) {
         }
       }
 
-      if (method === 'POST' && url.pathname === '/auth/otp/send') {
-        const body = await readJsonBody(req, logger);
-        const curp = typeof body.curp === 'string' ? body.curp.trim() : '';
-
-        if (!curp) {
-          return sendJson(res, 400, { error: 'curp_required', requestId });
-        }
-
-        const ipAddress = getClientFingerprint(req) || 'unknown';
-        const ipLimit = Number(env.OTP_IP_MAX_REQUESTS || 5);
-        const ipWindowSeconds = Number(env.OTP_IP_WINDOW_SECONDS || 60);
-
-        if (ipLimit > 0) {
-          const rate = await enforceRateLimit({
-            env,
-            logger,
-            res,
-            key: `auth:otp:ip:${ipAddress}`,
-            limit: ipLimit,
-            windowSeconds: ipWindowSeconds,
-            requestId,
-            path: url.pathname,
-          });
-          if (!rate.allowed) {
-            return sendJson(res, 429, {
-              error: 'otp_rate_limited',
-              requestId,
-              retryAfterSeconds: rate.retryAfterSeconds,
-            });
-          }
-        }
-
-        try {
-          await sendOtp({ curp, env, logger, ipAddress });
-          res.writeHead(204);
-          res.end();
-          return;
-        } catch (error) {
-          if (error instanceof OtpError) {
-            if (error.retryAfterSeconds) {
-              res.setHeader('Retry-After', String(error.retryAfterSeconds));
-            }
-            return sendJson(res, error.status, {
-              error: error.code,
-              message: error.message,
-              requestId,
-              retryAfterSeconds: error.retryAfterSeconds || 0,
-            });
-          }
-          throw error;
-        }
-      }
-
-      if (method === 'POST' && url.pathname === '/auth/otp/verify') {
-        const body = await readJsonBody(req, logger);
-        const curp = typeof body.curp === 'string' ? body.curp.trim() : '';
-        const otp = typeof body.otp === 'string' ? body.otp.trim() : '';
-
-        try {
-          const result = await verifyOtp({
-            curp,
-            otp,
-            env,
-            logger,
-            metadata: {
-              ipAddress: getClientFingerprint(req) || 'unknown',
-              userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
-            },
-          });
-          return sendJson(res, 200, { ...result, requestId });
-        } catch (error) {
-          if (error instanceof OtpError) {
-            return sendJson(res, error.status, {
-              error: error.code,
-              message: error.message,
-              requestId,
-              retryAfterSeconds: error.retryAfterSeconds || 0,
-            });
-          }
-          throw error;
-        }
-      }
-
-      if (method === 'POST' && url.pathname === '/auth/refresh') {
-        const body = await readJsonBody(req, logger);
-        const refreshToken = typeof body.refreshToken === 'string' ? body.refreshToken.trim() : '';
-
-        if (!refreshToken) {
-          return sendJson(res, 400, { error: 'refresh_token_required', requestId });
-        }
-
-        try {
-          const { accessToken } = await refreshAccessToken({ token: refreshToken, env });
-          return sendJson(res, 200, { accessToken, requestId });
-        } catch (error) {
-          if (error instanceof RefreshTokenError) {
-            return sendJson(res, error.status, { error: error.code, message: error.message, requestId });
-          }
-          throw error;
-        }
-      }
-
-      if (method === 'POST' && url.pathname === '/auth/logout') {
-        const body = await readJsonBody(req, logger);
-        const refreshToken = typeof body.refreshToken === 'string' ? body.refreshToken.trim() : '';
-
-        if (!refreshToken) {
-          res.writeHead(204);
-          res.end();
-          return;
-        }
-
-        try {
-          await revokeRefreshToken({ token: refreshToken, env });
-        } catch (error) {
-          if (!(error instanceof RefreshTokenError)) {
-            throw error;
-          }
-          if (['refresh_not_found', 'refresh_revoked', 'refresh_expired'].includes(error.code)) {
-            // swallow silently to keep logout idempotent
-          } else {
-            return sendJson(res, error.status, { error: error.code, message: error.message, requestId });
-          }
-        }
-
-        res.writeHead(204);
-        res.end();
-        return;
-      }
-
       if (method === 'POST' && url.pathname === '/auth/login') {
         const body = await readJsonBody(req, logger);
         const userId = typeof body.userId === 'string' ? body.userId.trim() : '';
@@ -1517,34 +1297,6 @@ function attachQueueObservers(queuesPromise, logger, env) {
     });
 }
 
-function createDisabledQueues() {
-  const disabledQueue = () => ({
-    add: async () => {
-      throw new Error('queue_disabled');
-    },
-    countWaiting: async () => 0,
-    countDelayed: async () => 0,
-    countActive: async () => 0,
-  });
-
-  return {
-    whatsappQueue: disabledQueue(),
-    whatsappEvents: null,
-    emailQueue: disabledQueue(),
-    emailEvents: null,
-    pdfQueue: disabledQueue(),
-    pdfEvents: null,
-    deliveryFailedQueue: disabledQueue(),
-    deliveryFailedEvents: null,
-    waOutboundQueue: disabledQueue(),
-    waOutboundEvents: null,
-    waInboundQueue: disabledQueue(),
-    waInboundEvents: null,
-    paymentsQueue: disabledQueue(),
-    paymentsEvents: null,
-  };
-}
-
 export function createLoginTokens({ userId, role, env = process.env }) {
   const payload = { sub: userId, role };
   const tokens = {
@@ -1567,26 +1319,15 @@ export async function ensureDependencies(options = {}) {
   const logger = options.logger || createLogger({ env, service: env.SERVICE_NAME || 'backend-api' });
   const dbHost = env.DB_HOST || 'database';
   const dbPort = Number(env.DB_PORT || 5432);
-  const redisUrl = env.REDIS_URL || 'redis://redis:6379';
-  const redisHost = new URL(redisUrl);
+  const redisHost = new URL(env.REDIS_URL || 'redis://redis:6379');
   const retries = Number(env.STARTUP_RETRIES || 10);
-  const usingMemoryDb = ['memory'].includes(String(env.DB_DRIVER || '').toLowerCase()) ||
-    String(env.DATABASE_URL || '').toLowerCase().startsWith('memory://');
-  const usingMemoryRedis = ['memory'].includes(String(env.REDIS_DRIVER || '').toLowerCase()) ||
-    redisUrl.startsWith('memory://');
 
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     try {
-      const checks = [];
-      if (!usingMemoryDb) {
-        checks.push(waitForPort(dbHost, dbPort));
-      }
-      if (!usingMemoryRedis) {
-        checks.push(waitForPort(redisHost.hostname, Number(redisHost.port || 6379)));
-      }
-      if (checks.length > 0) {
-        await Promise.all(checks);
-      }
+      await Promise.all([
+        waitForPort(dbHost, dbPort),
+        waitForPort(redisHost.hostname, Number(redisHost.port || 6379)),
+      ]);
       log({ level: 'info', message: 'dependencies_ready', attempt }, { logger });
       return;
     } catch (error) {
