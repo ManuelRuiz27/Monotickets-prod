@@ -16,6 +16,22 @@ module.exports = {
     },
   },
   suites: {
+    health: {
+      specs: ['tests/e2e_health/**/*.{spec,test}.{js,ts,jsx,tsx}'],
+      tags: ['@health', '@critical'],
+    },
+    guests: {
+      specs: ['tests/e2e_guests/**/*.{spec,test}.{js,ts,jsx,tsx}'],
+      tags: ['@guests', '@critical'],
+    },
+    scan: {
+      specs: ['tests/e2e_staff/**/*.{spec,test}.{js,ts,jsx,tsx}'],
+      tags: ['@scan', '@critical'],
+    },
+    wa: {
+      specs: ['tests/e2e_delivery/**/*.{spec,test}.{js,ts,jsx,tsx}'],
+      tags: ['@wa', '@critical'],
+    },
     confirmations: {
       specs: [
         'tests/e2e_guest/**/*.{spec,test}.{js,ts,jsx,tsx}',

@@ -36,8 +36,12 @@ async function main() {
   const tasks = [];
   const runAll = selectedTags.length === 0;
 
-  if (runAll || selectedTags.includes('@confirm')) {
-    tasks.push(runGuestFlow());
+  if (runAll || selectedTags.includes('@health')) {
+    tasks.push(runHealthSuite());
+  }
+
+  if (runAll || selectedTags.includes('@confirm') || selectedTags.includes('@guests')) {
+    tasks.push(runGuestFlow({ includeCreation: runAll || selectedTags.includes('@guests') }));
   }
 
   if (runAll || selectedTags.includes('@scan')) {
@@ -87,7 +91,12 @@ async function runSmokeChecks() {
   log({ level: 'info', message: 'smoke_checks_ok' });
 }
 
-async function runGuestFlow() {
+async function runHealthSuite() {
+  await Promise.all([checkBackendHealth(), checkFrontendHealth()]);
+  log({ level: 'info', message: 'health_checks_ok' });
+}
+
+async function runGuestFlow({ includeCreation = false } = {}) {
   await runSmokeChecks();
   const backendBase = await resolveBackendBase();
   const eventId = process.env.E2E_EVENT_ID || 'demo-event';
@@ -100,7 +109,48 @@ async function runGuestFlow() {
   if (!Array.isArray(payload.guests)) {
     throw new Error('Guest endpoint responded without guests array');
   }
-  log({ level: 'info', message: 'guest_flow_ok', event_id: eventId, guests: payload.guests.length });
+
+  const baseline = payload.guests.length;
+  log({ level: 'info', message: 'guest_flow_ok', event_id: eventId, guests: baseline });
+
+  if (includeCreation) {
+    await createGuest({ backendBase, eventId, baseline });
+  }
+}
+
+async function createGuest({ backendBase, eventId, baseline }) {
+  const payload = {
+    name: `Auto Guest ${Date.now()}`,
+    email: `autoguest-${Date.now()}@example.com`,
+    phone: `555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`,
+    status: 'pending',
+  };
+
+  const createResponse = await timedFetch(buildUrl(backendBase, `/events/${encodeURIComponent(eventId)}/guests`), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-request-source': 'e2e-runner' },
+    body: JSON.stringify(payload),
+  });
+
+  const status = createResponse.status;
+  if (status >= 200 && status < 300) {
+    log({ level: 'info', message: 'guest_created', event_id: eventId, status });
+    const followUp = await timedFetch(buildUrl(backendBase, `/events/${encodeURIComponent(eventId)}/guests`));
+    if (followUp.ok) {
+      const body = await followUp.json().catch(() => ({ guests: [] }));
+      const total = Array.isArray(body.guests) ? body.guests.length : baseline;
+      log({ level: 'info', message: 'guest_list_updated', guests: total, baseline });
+    }
+    return;
+  }
+
+  if (status >= 400 && status < 500) {
+    const errorPayload = await createResponse.json().catch(() => ({ status }));
+    log({ level: 'warn', message: 'guest_create_validation_error', status, payload: errorPayload });
+    return;
+  }
+
+  throw new Error(`Guest creation returned unexpected status ${status}`);
 }
 
 async function runScanFlow() {
@@ -185,6 +235,15 @@ async function checkFrontendHome() {
     throw new Error(`Frontend home failed with status ${response.status}`);
   }
   log({ level: 'info', message: 'frontend_home_ok' });
+}
+
+async function checkFrontendHealth() {
+  const frontendBase = await resolveFrontendBase();
+  const response = await timedFetch(buildUrl(frontendBase, '/health'));
+  if (!response.ok) {
+    throw new Error(`Frontend health failed with status ${response.status}`);
+  }
+  log({ level: 'info', message: 'frontend_health_ok' });
 }
 
 async function resolveBackendBase() {
